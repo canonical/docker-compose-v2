@@ -1,0 +1,3 @@
+Tests: basic-smoke
+Depends: @, docker.io, curl
+Restrictions: isolation-machine needs-root allow-stderr

@@ -1,0 +1,24 @@
+Source: docker-compose-v2
+Section: admin
+Priority: optional
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Build-Depends: debhelper-compat (= 12),
+               golang-go
+Standards-Version: 4.6.2
+Homepage: https://github.com/docker/compose
+Vcs-Git: https://github.com/canonical/docker-compose-v2.git
+Vcs-Browser: https://github.com/canonical/docker-compose-v2
+Rules-Requires-Root: no
+
+Package: docker-compose-v2
+Architecture: amd64 arm64 armhf i386 ppc64el riscv64 s390x
+Depends: docker.io,
+         ${misc:Depends},
+         ${shlibs:Depends}
+Built-Using: ${libc:Built-Using}, ${misc:Built-Using}
+Description: tool for running multi-container applications on Docker
+ Docker Compose is a tool for running multi-container applications on Docker
+ defined using the Compose file format. A Compose file is used to define how one
+ or more containers that make up your application are configured. Once you have
+ a Compose file, you can create and start your application with a single
+ command: docker compose up.

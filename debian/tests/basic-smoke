@@ -1,0 +1,86 @@
+#!/bin/bash
+
+set -eux -o pipefail
+
+# This test is based on the Docker Compose v2 upstream documentation on how to
+# get started with it: https://docs.docker.com/compose/gettingstarted/
+
+# Write the web app code.
+cat > app.py <<EOF
+import time
+
+import redis
+from flask import Flask
+
+app = Flask(__name__)
+cache = redis.Redis(host='redis', port=6379)
+
+def get_hit_count():
+    retries = 5
+    while True:
+        try:
+            return cache.incr('hits')
+        except redis.exceptions.ConnectionError as exc:
+            if retries == 0:
+                raise exc
+            retries -= 1
+            time.sleep(0.5)
+
+@app.route('/')
+def hello():
+    count = get_hit_count()
+    return 'Hello World! I have been seen {} times.\n'.format(count)
+EOF
+
+# Create the web app Dockerfile
+cat > Dockerfile <<EOF
+FROM ubuntu:22.04
+WORKDIR /code
+ENV FLASK_APP=app.py
+ENV FLASK_RUN_HOST=0.0.0.0
+RUN apt update && apt install -y python3 python3-flask python3-redis
+EXPOSE 5000
+COPY . .
+CMD ["flask", "run"]
+EOF
+
+# Create the Docker Compose v2 file
+cat > compose.yaml <<EOF
+services:
+  web:
+    build: .
+    ports:
+      - "8000:5000"
+    volumes:
+      - .:/code
+  redis:
+    image: "ubuntu/redis"
+    environment:
+      - ALLOW_EMPTY_PASSWORD="yes"
+EOF
+
+# Run the web app in background
+docker compose up -d
+
+# Check if the containers are running
+docker ps | grep web | grep Up
+docker ps | grep redis | grep Up
+
+# Check if the port 8000 is in use
+ss -lnptu | grep 8000 | grep LISTEN
+
+# Check if environment variable as correctly set
+docker compose run redis env | grep ALLOW_EMPTY_PASSWORD | grep yes
+docker compose run web env | grep FLASK_APP | grep "app.py"
+docker compose run web env | grep FLASK_RUN_HOST | grep "0.0.0.0"
+
+# Try to access the web app some times and check the counter
+for i in {1..5}; do
+  curl --silent http://localhost:8000 | grep "Hello World!" | grep "$i times"
+done
+
+# Stop the containers
+docker compose stop
+
+# Remove containers and volume
+docker compose down --volume

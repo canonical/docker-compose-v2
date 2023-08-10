@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+include /usr/share/dpkg/pkg-info.mk
+export VERSION := $(DEB_VERSION)
+
+# temporary build path (see http://golang.org/doc/code.html#GOPATH)
+OUR_GOPATH := $(CURDIR)/.gopath
+export GOPATH := $(OUR_GOPATH)
+export GOCACHE := $(CURDIR)/.gocache
+
+# https://blog.golang.org/go116-module-changes (TODO figure out a new solution for Go 1.17+)
+export GO111MODULE := auto
+
+override_dh_gencontrol:
+	echo 'libc:Built-Using=$(shell dpkg-query -f '$${source:Package} (= $${source:Version})' -W libc-dev-bin)' >> debian/docker-compose-v2.substvars
+	dh_gencontrol
+
+override_dh_auto_build:
+	VERSION="$(VERSION)" make build
+
+# Basic smoke test to ensure binary built successfully
+# (especially since its actual tests, even unit tests, are *really* involved.
+# They depend on docker itself which requires user's permission adjustement or
+# running with root. That's just the beginning :)
+# Let's smoke test the plugin via autopkgtest. FWIW this is the same thing we
+# do with src:docker.io-app.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	./bin/build/docker-compose version
+endif
+
+override_dh_strip:
+	# Go has lots of problems with stripping, so just don't
+
+override_dh_auto_install:
+	# we use dh_install / dh-exec for installing files where they need to be
+
+override_dh_dwz:
+	# do not call dh_dwz to avoid "dwz: Too few files for multifile optimization"
+	# dh_dwz --no-dwz-multifile also does not work :)
+
+%:
+	dh $@

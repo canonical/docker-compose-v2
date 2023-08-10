@@ -1,0 +1,2 @@
+# This package does not provide any go module to be imported
+docker-compose-v2 source: missing-xs-go-import-path-for-golang-package
