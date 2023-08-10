@@ -1,0 +1,289 @@
+name: ci
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - 'v2'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'To run with tmate enter "debug_enabled"'
+        required: false
+        default: "false"
+
+env:
+  DOCKER_CLI_VERSION: "20.10.17"
+
+permissions:
+  contents: read # to fetch code (actions/checkout)
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Create matrix
+        id: platforms
+        run: |
+          echo matrix=$(docker buildx bake binary-cross --print | jq -cr '.target."binary-cross".platforms') >> $GITHUB_OUTPUT
+      -
+        name: Show matrix
+        run: |
+          echo ${{ steps.platforms.outputs.matrix }}
+
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - lint
+          - validate-go-mod
+          - validate-headers
+          - validate-docs
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      -
+        name: Run
+        run: |
+          make ${{ matrix.target }}
+
+  binary:
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      -
+        name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      -
+        name: Build
+        uses: docker/bake-action@v2
+        with:
+          targets: release
+          set: |
+            *.platform=${{ matrix.platform }}
+            *.cache-from=type=gha,scope=binary-${{ env.PLATFORM_PAIR }}
+            *.cache-to=type=gha,scope=binary-${{ env.PLATFORM_PAIR }},mode=max
+      -
+        name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: compose
+          path: ./bin/release/*
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      -
+        name: Test
+        uses: docker/bake-action@v2
+        with:
+          targets: test
+          set: |
+            *.cache-from=type=gha,scope=test
+            *.cache-to=type=gha,scope=test
+      -
+        name: Gather coverage data
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-data-unit
+          path: bin/coverage/unit/
+          if-no-files-found: error
+
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - plugin
+          - standalone
+          - cucumber
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      -
+        name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+      -
+        name: Setup docker CLI
+        run: |
+          curl https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz | tar xz
+          sudo cp ./docker/docker /usr/bin/ && rm -rf docker && docker version
+      -
+        name: Build
+        uses: docker/bake-action@v2
+        with:
+          targets: binary-with-coverage
+          set: |
+            *.cache-from=type=gha,scope=binary-linux-amd64
+            *.cache-from=type=gha,scope=binary-e2e-${{ matrix.mode }}
+            *.cache-to=type=gha,scope=binary-e2e-${{ matrix.mode }},mode=max
+        env:
+          BUILD_TAGS: e2e
+      -
+        name: Setup tmate session
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
+        uses: mxschmitt/action-tmate@8b4e4ac71822ed7e0ad5fb3d1c33483e9e8fb270 # v3.11
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Test plugin mode
+        if: ${{ matrix.mode == 'plugin' }}
+        run: |
+          rm -rf ./bin/coverage/e2e
+          mkdir -p ./bin/coverage/e2e
+          make e2e-compose GOCOVERDIR=bin/coverage/e2e TEST_FLAGS="-v"
+      -
+        name: Gather coverage data
+        if: ${{ matrix.mode == 'plugin' }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-data-e2e
+          path: bin/coverage/e2e/
+          if-no-files-found: error
+      -
+        name: Test standalone mode
+        if: ${{ matrix.mode == 'standalone' }}
+        run: |
+          rm -f /usr/local/bin/docker-compose
+          cp bin/build/docker-compose /usr/local/bin
+          make e2e-compose-standalone
+      -
+        name: Run cucumber tests
+        if: ${{ matrix.mode == 'cucumber'}}
+        run: |
+          make test-cucumber
+
+  coverage:
+    runs-on: ubuntu-22.04
+    needs:
+      - test
+      - e2e
+    steps:
+      # codecov won't process the report without the source code available
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Download unit test coverage
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-data-unit
+          path: coverage/unit
+      - name: Download E2E test coverage
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-data-e2e
+          path: coverage/e2e
+      - name: Merge coverage reports
+        run: |
+          go tool covdata textfmt -i=./coverage/unit,./coverage/e2e -o ./coverage.txt
+      - name: Store coverage report in GitHub Actions
+        uses: actions/upload-artifact@v3
+        with:
+          name: go-covdata-txt
+          path: ./coverage.txt
+          if-no-files-found: error
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.txt
+
+  release:
+    permissions:
+      contents: write # to create a release (ncipollo/release-action)
+
+    runs-on: ubuntu-latest
+    needs:
+      - binary
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: compose
+          path: bin/release
+      -
+        name: Create checksums
+        working-directory: bin/release
+        run: |
+          find . -type f -print0 | sort -z | xargs -r0 shasum -a 256 -b | sed 's# \*\./# *#' > $RUNNER_TEMP/checksums.txt
+          shasum -a 256 -U -c $RUNNER_TEMP/checksums.txt
+          mv $RUNNER_TEMP/checksums.txt .
+          cat checksums.txt | while read sum file; do echo "$sum $file" > ${file#\*}.sha256; done
+      -
+        name: License
+        run: cp packaging/* bin/release/
+      -
+        name: List artifacts
+        run: |
+          tree -nh bin/release
+      -
+        name: Check artifacts
+        run: |
+          find bin/release -type f -exec file -e ascii -- {} +
+      -
+        name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: ncipollo/release-action@58ae73b360456532aafd58ee170c045abbeaee37 # v1.10.0
+        with:
+          artifacts: bin/release/*
+          generateReleaseNotes: true
+          draft: true
+          token: ${{ secrets.GITHUB_TOKEN }}
