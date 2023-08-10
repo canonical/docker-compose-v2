@@ -1,0 +1,40 @@
+#!/bin/bash
+
+set -eux
+set -o pipefail
+
+# Create a new builder
+docker buildx create --name mybuilder --use --bootstrap
+
+# Check the status of the builder
+docker buildx inspect mybuilder | grep Status | grep running
+
+# Write a very basic Dockerfile
+cat >Dockerfile <<EOF
+FROM ubuntu:22.04
+RUN apt-get update
+CMD cat /etc/os-release | grep VERSION
+EOF
+
+# There is still an issue related to loading multi-arch images. More info see
+# https://github.com/docker/buildx/issues/59 and
+# https://github.com/docker/roadmap/issues/371 .
+# Users can pass --push and publish the manifest list to a registry directly.
+# For our local test purpose let's just create a tarball with the content of
+# the image for now.
+docker buildx --builder mybuilder build --output=type=oci,dest=hello-buildx.tar --platform linux/amd64,linux/arm64,linux/s390x -t hello-buildx . 
+
+file hello-buildx.tar | grep 'tar archive'
+
+# Build image in a single architecture and load it
+docker buildx --builder mybuilder build --platform linux/amd64 -t hello-buildx:buildx-latest --load . 
+
+# Check if the image was loaded
+docker image ls | grep hello-buildx | grep buildx-latest
+
+# Run a container based on the built image
+docker run hello-buildx:buildx-latest | grep Jammy
+
+# Stop and remove the builder
+docker buildx stop mybuilder
+docker buildx rm mybuilder

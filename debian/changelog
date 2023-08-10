@@ -1,0 +1,5 @@
+docker-compose-v2 (2.20.2+ds1-0ubuntu1) mantic; urgency=medium
+
+  * Initial release.
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Thu, 10 Aug 2023 10:17:52 -0300

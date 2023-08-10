@@ -1,0 +1,18 @@
+Description: Fix build with vendor code
+ Upstream does not use -mod=vendor, and in the Debian package we are using that
+ to avoid downloading dependencies from the Internet.
+Author: Lucas Kanashiro <kanashiro@ubuntu.com>
+Forwarded: not-needed
+Last-Update: 2023-08-10
+
+--- a/Makefile
++++ b/Makefile
+@@ -54,7 +54,7 @@
+ 
+ .PHONY: build ## Build the compose cli-plugin
+ build:
+-	GO111MODULE=on go build $(BUILD_FLAGS) -trimpath -tags "$(GO_BUILDTAGS)" -ldflags "$(GO_LDFLAGS)" -o "$(or $(DESTDIR),./bin/build)/docker-compose$(BINARY_EXT)" ./cmd
++	GO111MODULE=auto go build -mod vendor $(BUILD_FLAGS) -trimpath -tags "$(GO_BUILDTAGS)" -ldflags "$(GO_LDFLAGS)" -o "$(or $(DESTDIR),./bin/build)/docker-compose$(BINARY_EXT)" ./cmd
+ 
+ .PHONY: binary
+ binary:
