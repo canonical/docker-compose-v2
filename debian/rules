@@ -30,9 +30,6 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	./bin/build/docker-compose version
 endif
 
-override_dh_strip:
-	# Go has lots of problems with stripping, so just don't
-
 override_dh_auto_install:
 	# we use dh_install / dh-exec for installing files where they need to be
 

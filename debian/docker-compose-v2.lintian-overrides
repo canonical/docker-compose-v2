@@ -1,2 +1,0 @@
-# Go binaries have some problems with stripping
-docker-compose-v2: unstripped-binary-or-object [usr/libexec/docker/cli-plugins/docker-compose]
