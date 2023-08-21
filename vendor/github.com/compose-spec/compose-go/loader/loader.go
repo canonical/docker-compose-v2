@@ -17,6 +17,7 @@
 package loader
 
 import (
+	"context"
 	"fmt"
 	"os"
 	paths "path"
@@ -68,6 +69,16 @@ type Options struct {
 	projectNameImperativelySet bool
 	// Profiles set profiles to enable
 	Profiles []string
+	// ResourceLoaders manages support for remote resources
+	ResourceLoaders []ResourceLoader
+}
+
+// ResourceLoader is a plugable remote resource resolver
+type ResourceLoader interface {
+	// Accept returns `true` is the resource reference matches ResourceLoader supported protocol(s)
+	Accept(path string) bool
+	// Load returns the path to a local copy of remote resource identified by `path`.
+	Load(ctx context.Context, path string) (string, error)
 }
 
 func (o *Options) clone() *Options {
@@ -85,6 +96,7 @@ func (o *Options) clone() *Options {
 		projectName:                o.projectName,
 		projectNameImperativelySet: o.projectNameImperativelySet,
 		Profiles:                   o.Profiles,
+		ResourceLoaders:            o.ResourceLoaders,
 	}
 }
 
@@ -193,8 +205,14 @@ func parseYAML(source []byte) (map[string]interface{}, PostProcessor, error) {
 	return converted.(map[string]interface{}), &processor, nil
 }
 
-// Load reads a ConfigDetails and returns a fully loaded configuration
+// Load reads a ConfigDetails and returns a fully loaded configuration.
+// Deprecated: use LoadWithContext.
 func Load(configDetails types.ConfigDetails, options ...func(*Options)) (*types.Project, error) {
+	return LoadWithContext(context.Background(), configDetails, options...)
+}
+
+// LoadWithContext reads a ConfigDetails and returns a fully loaded configuration
+func LoadWithContext(ctx context.Context, configDetails types.ConfigDetails, options ...func(*Options)) (*types.Project, error) {
 	if len(configDetails.ConfigFiles) < 1 {
 		return nil, errors.Errorf("No files specified")
 	}
@@ -217,10 +235,10 @@ func Load(configDetails types.ConfigDetails, options ...func(*Options)) (*types.
 		return nil, err
 	}
 	opts.projectName = projectName
-	return load(configDetails, opts, nil)
+	return load(ctx, configDetails, opts, nil)
 }
 
-func load(configDetails types.ConfigDetails, opts *Options, loaded []string) (*types.Project, error) {
+func load(ctx context.Context, configDetails types.ConfigDetails, opts *Options, loaded []string) (*types.Project, error) {
 	var model *types.Config
 
 	mainFile := configDetails.ConfigFiles[0].Filename
@@ -232,6 +250,7 @@ func load(configDetails types.ConfigDetails, opts *Options, loaded []string) (*t
 	}
 	loaded = append(loaded, mainFile)
 
+	includeRefs := make(map[string][]types.IncludeConfig)
 	for i, file := range configDetails.ConfigFiles {
 		var postProcessor PostProcessor
 		configDict := file.Config
@@ -261,15 +280,19 @@ func load(configDetails types.ConfigDetails, opts *Options, loaded []string) (*t
 
 		configDict = groupXFieldsIntoExtensions(configDict)
 
-		cfg, err := loadSections(file.Filename, configDict, configDetails, opts)
+		cfg, err := loadSections(ctx, file.Filename, configDict, configDetails, opts)
 		if err != nil {
 			return nil, err
 		}
 
 		if !opts.SkipInclude {
-			cfg, err = loadInclude(configDetails, cfg, opts, loaded)
+			var included map[string][]types.IncludeConfig
+			cfg, included, err = loadInclude(ctx, file.Filename, configDetails, cfg, opts, loaded)
 			if err != nil {
 				return nil, err
+			}
+			for k, v := range included {
+				includeRefs[k] = append(includeRefs[k], v...)
 			}
 		}
 
@@ -301,6 +324,10 @@ func load(configDetails types.ConfigDetails, opts *Options, loaded []string) (*t
 		Configs:     model.Configs,
 		Environment: configDetails.Environment,
 		Extensions:  model.Extensions,
+	}
+
+	if len(includeRefs) != 0 {
+		project.IncludeReferences = includeRefs
 	}
 
 	if !opts.SkipNormalization {
@@ -453,7 +480,7 @@ func groupXFieldsIntoExtensions(dict map[string]interface{}) map[string]interfac
 	return dict
 }
 
-func loadSections(filename string, config map[string]interface{}, configDetails types.ConfigDetails, opts *Options) (*types.Config, error) {
+func loadSections(ctx context.Context, filename string, config map[string]interface{}, configDetails types.ConfigDetails, opts *Options) (*types.Config, error) {
 	var err error
 	cfg := types.Config{
 		Filename: filename,
@@ -466,7 +493,7 @@ func loadSections(filename string, config map[string]interface{}, configDetails 
 		}
 	}
 	cfg.Name = name
-	cfg.Services, err = LoadServices(filename, getSection(config, "services"), configDetails.WorkingDir, configDetails.LookupEnv, opts)
+	cfg.Services, err = LoadServices(ctx, filename, getSection(config, "services"), configDetails.WorkingDir, configDetails.LookupEnv, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -659,7 +686,7 @@ func formatInvalidKeyError(keyPrefix string, key interface{}) error {
 
 // LoadServices produces a ServiceConfig map from a compose file Dict
 // the servicesDict is not validated if directly used. Use Load() to enable validation
-func LoadServices(filename string, servicesDict map[string]interface{}, workingDir string, lookupEnv template.Mapping, opts *Options) ([]types.ServiceConfig, error) {
+func LoadServices(ctx context.Context, filename string, servicesDict map[string]interface{}, workingDir string, lookupEnv template.Mapping, opts *Options) ([]types.ServiceConfig, error) {
 	var services []types.ServiceConfig
 
 	x, ok := servicesDict[extensions]
@@ -672,7 +699,7 @@ func LoadServices(filename string, servicesDict map[string]interface{}, workingD
 	}
 
 	for name := range servicesDict {
-		serviceConfig, err := loadServiceWithExtends(filename, name, servicesDict, workingDir, lookupEnv, opts, &cycleTracker{})
+		serviceConfig, err := loadServiceWithExtends(ctx, filename, name, servicesDict, workingDir, lookupEnv, opts, &cycleTracker{})
 		if err != nil {
 			return nil, err
 		}
@@ -683,7 +710,7 @@ func LoadServices(filename string, servicesDict map[string]interface{}, workingD
 	return services, nil
 }
 
-func loadServiceWithExtends(filename, name string, servicesDict map[string]interface{}, workingDir string, lookupEnv template.Mapping, opts *Options, ct *cycleTracker) (*types.ServiceConfig, error) {
+func loadServiceWithExtends(ctx context.Context, filename, name string, servicesDict map[string]interface{}, workingDir string, lookupEnv template.Mapping, opts *Options, ct *cycleTracker) (*types.ServiceConfig, error) {
 	if err := ct.Add(filename, name); err != nil {
 		return nil, err
 	}
@@ -707,11 +734,21 @@ func loadServiceWithExtends(filename, name string, servicesDict map[string]inter
 		var baseService *types.ServiceConfig
 		file := serviceConfig.Extends.File
 		if file == "" {
-			baseService, err = loadServiceWithExtends(filename, baseServiceName, servicesDict, workingDir, lookupEnv, opts, ct)
+			baseService, err = loadServiceWithExtends(ctx, filename, baseServiceName, servicesDict, workingDir, lookupEnv, opts, ct)
 			if err != nil {
 				return nil, err
 			}
 		} else {
+			for _, loader := range opts.ResourceLoaders {
+				if loader.Accept(file) {
+					path, err := loader.Load(ctx, file)
+					if err != nil {
+						return nil, err
+					}
+					file = path
+					break
+				}
+			}
 			// Resolve the path to the imported file, and load it.
 			baseFilePath := absPath(workingDir, file)
 
@@ -726,7 +763,7 @@ func loadServiceWithExtends(filename, name string, servicesDict map[string]inter
 			}
 
 			baseFileServices := getSection(baseFile, "services")
-			baseService, err = loadServiceWithExtends(baseFilePath, baseServiceName, baseFileServices, filepath.Dir(baseFilePath), lookupEnv, opts, ct)
+			baseService, err = loadServiceWithExtends(ctx, baseFilePath, baseServiceName, baseFileServices, filepath.Dir(baseFilePath), lookupEnv, opts, ct)
 			if err != nil {
 				return nil, err
 			}
@@ -1038,7 +1075,12 @@ var transformServiceDeviceRequest TransformerFunc = func(data interface{}) (inte
 					value["count"] = -1
 					return value, nil
 				}
-				return data, errors.Errorf("invalid string value for 'count' (the only value allowed is 'all')")
+				i, err := strconv.ParseInt(val, 10, 64)
+				if err == nil {
+					value["count"] = i
+					return value, nil
+				}
+				return data, errors.Errorf("invalid string value for 'count' (the only value allowed is 'all' or a number)")
 			default:
 				return data, errors.Errorf("invalid type %T for device count", val)
 			}
