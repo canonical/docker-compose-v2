@@ -8,7 +8,7 @@ require (
 	github.com/buger/goterm v1.0.4
 	github.com/compose-spec/compose-go v1.17.0
 	github.com/containerd/console v1.0.3
-	github.com/containerd/containerd v1.7.2
+	github.com/containerd/containerd v1.7.4
 	github.com/cucumber/godog v0.0.0-00010101000000-000000000000 // replaced; see replace for the actual version used
 	github.com/distribution/distribution/v3 v3.0.0-20230601133803-97b1d649c493
 	github.com/docker/buildx v0.11.2
@@ -50,7 +50,7 @@ require (
 )
 
 require (
-	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230106234847-43070de90fa1 // indirect
+	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230811130428-ced1acdcaa24 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/Masterminds/semver/v3 v3.2.1 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.17.6 // indirect
@@ -70,11 +70,10 @@ require (
 	github.com/cenkalti/backoff/v4 v4.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/cloudflare/cfssl v1.6.4 // indirect
-	github.com/containerd/continuity v0.4.1 // indirect
+	github.com/containerd/continuity v0.4.2-0.20230616210509-1e0d26eb2381 // indirect
 	github.com/containerd/typeurl/v2 v2.1.1 // indirect
 	github.com/cucumber/gherkin-go/v19 v19.0.3 // indirect
 	github.com/cucumber/messages-go/v16 v16.0.1 // indirect
-	github.com/cyphar/filepath-securejoin v0.2.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.7.0 // indirect
