@@ -1,3 +1,9 @@
+docker-compose-v2 (2.20.2+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
+
+  * Backport version from Mantic to Jammy (LP: #1968035, #2036350).
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Sun, 17 Sep 2023 09:26:22 -0300
+
 docker-compose-v2 (2.20.2+ds1-0ubuntu1) mantic; urgency=medium
 
   * Initial release.
