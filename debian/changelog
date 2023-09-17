@@ -1,3 +1,9 @@
+docker-compose-v2 (2.20.2+ds1-0ubuntu1~23.04.1) lunar; urgency=medium
+
+  * Backport version in Mantic to Lunar (LP: #2036350).
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Sun, 17 Sep 2023 09:14:00 -0300
+
 docker-compose-v2 (2.20.2+ds1-0ubuntu1) mantic; urgency=medium
 
   * Initial release.
