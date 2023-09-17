@@ -1,6 +1,9 @@
 docker-compose-v2 (2.20.2+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
 
   * Backport version from Mantic to Jammy (LP: #1968035, #2036350).
+    - Build with Go 1.20.
+      + d/control: b-d on golang-1.20-go.
+      + d/rules: add Go 1.20 to $PATH.
 
  -- Lucas Kanashiro <kanashiro@ubuntu.com>  Sun, 17 Sep 2023 09:26:22 -0300
 
