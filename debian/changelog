@@ -1,3 +1,9 @@
+docker-compose-v2 (2.24.6+ds1-0ubuntu1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Mon, 19 Feb 2024 17:43:43 -0300
+
 docker-compose-v2 (2.20.2+ds1-0ubuntu1) mantic; urgency=medium
 
   * Initial release.
