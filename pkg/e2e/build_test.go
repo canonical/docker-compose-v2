@@ -19,7 +19,9 @@ package e2e
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,8 +38,8 @@ func TestLocalComposeBuild(t *testing.T) {
 
 		t.Run(env+" build named and unnamed images", func(t *testing.T) {
 			// ensure local test run does not reuse previously build image
-			c.RunDockerOrExitError(t, "rmi", "build-test-nginx")
-			c.RunDockerOrExitError(t, "rmi", "custom-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "build-test-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "custom-nginx")
 
 			res := c.RunDockerComposeCmd(t, "--project-directory", "fixtures/build-test", "build")
 
@@ -48,8 +50,8 @@ func TestLocalComposeBuild(t *testing.T) {
 
 		t.Run(env+" build with build-arg", func(t *testing.T) {
 			// ensure local test run does not reuse previously build image
-			c.RunDockerOrExitError(t, "rmi", "build-test-nginx")
-			c.RunDockerOrExitError(t, "rmi", "custom-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "build-test-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "custom-nginx")
 
 			c.RunDockerComposeCmd(t, "--project-directory", "fixtures/build-test", "build", "--build-arg", "FOO=BAR")
 
@@ -59,8 +61,8 @@ func TestLocalComposeBuild(t *testing.T) {
 
 		t.Run(env+" build with build-arg set by env", func(t *testing.T) {
 			// ensure local test run does not reuse previously build image
-			c.RunDockerOrExitError(t, "rmi", "build-test-nginx")
-			c.RunDockerOrExitError(t, "rmi", "custom-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "build-test-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "custom-nginx")
 
 			icmd.RunCmd(c.NewDockerComposeCmd(t,
 				"--project-directory",
@@ -70,7 +72,7 @@ func TestLocalComposeBuild(t *testing.T) {
 				"FOO"),
 				func(cmd *icmd.Cmd) {
 					cmd.Env = append(cmd.Env, "FOO=BAR")
-				})
+				}).Assert(t, icmd.Success)
 
 			res := c.RunDockerCmd(t, "image", "inspect", "build-test-nginx")
 			res.Assert(t, icmd.Expected{Out: `"FOO": "BAR"`})
@@ -90,8 +92,9 @@ func TestLocalComposeBuild(t *testing.T) {
 		})
 
 		t.Run(env+" build as part of up", func(t *testing.T) {
-			c.RunDockerOrExitError(t, "rmi", "build-test-nginx")
-			c.RunDockerOrExitError(t, "rmi", "custom-nginx")
+			// ensure local test run does not reuse previously build image
+			c.RunDockerOrExitError(t, "rmi", "-f", "build-test-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "custom-nginx")
 
 			res := c.RunDockerComposeCmd(t, "--project-directory", "fixtures/build-test", "up", "-d")
 			t.Cleanup(func() {
@@ -128,8 +131,8 @@ func TestLocalComposeBuild(t *testing.T) {
 
 		t.Run(env+" cleanup build project", func(t *testing.T) {
 			c.RunDockerComposeCmd(t, "--project-directory", "fixtures/build-test", "down")
-			c.RunDockerCmd(t, "rmi", "build-test-nginx")
-			c.RunDockerCmd(t, "rmi", "custom-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "build-test-nginx")
+			c.RunDockerOrExitError(t, "rmi", "-f", "custom-nginx")
 		})
 	}
 
@@ -330,7 +333,7 @@ func TestBuildPlatformsWithCorrectBuildxConfig(t *testing.T) {
 	t.Run("multi-arch up --build", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "--project-directory", "fixtures/build-test/platforms", "up", "--build")
 		assert.NilError(t, res.Error, res.Stderr())
-		res.Assert(t, icmd.Expected{Out: "platforms-platforms-1 exited with code 0"})
+		res.Assert(t, icmd.Expected{Out: "platforms-1 exited with code 0"})
 	})
 
 	t.Run("use DOCKER_DEFAULT_PLATFORM value when up --build", func(t *testing.T) {
@@ -366,10 +369,21 @@ func TestBuildPrivileged(t *testing.T) {
 	})
 
 	t.Run("use build privileged mode to run insecure build command", func(t *testing.T) {
-		res := c.RunDockerComposeCmdNoCheck(t, "--project-directory", "fixtures/build-test/privileged", "build")
-		assert.NilError(t, res.Error, res.Stderr())
-		res.Assert(t, icmd.Expected{Out: "CapEff:\t0000003fffffffff"})
+		res := c.RunDockerComposeCmd(t, "--project-directory", "fixtures/build-test/privileged", "build")
+		capEffRe := regexp.MustCompile("CapEff:\t([0-9a-f]+)")
+		matches := capEffRe.FindStringSubmatch(res.Stdout())
+		assert.Equal(t, 2, len(matches), "Did not match CapEff in output, matches: %v", matches)
 
+		capEff, err := strconv.ParseUint(matches[1], 16, 64)
+		assert.NilError(t, err, "Parsing CapEff: %s", matches[1])
+
+		// NOTE: can't use constant from x/sys/unix or tests won't compile on macOS/Windows
+		// #define CAP_SYS_ADMIN        21
+		// https://github.com/torvalds/linux/blob/v6.1/include/uapi/linux/capability.h#L278
+		const capSysAdmin = 0x15
+		if capEff&capSysAdmin != capSysAdmin {
+			t.Fatalf("CapEff %s is missing CAP_SYS_ADMIN", matches[1])
+		}
 	})
 }
 
@@ -392,7 +406,8 @@ func TestBuildPlatformsStandardErrors(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "--project-directory", "fixtures/build-test/platforms", "build")
 		res.Assert(t, icmd.Expected{
 			ExitCode: 17,
-			Err:      `Multiple platforms feature is currently not supported for docker driver. Please switch to a different driver (eg. "docker buildx create --use")`,
+			Err: `Multi-platform build is not supported for the docker driver.
+Switch to a different driver, or turn on the containerd image store, and try again.`,
 		})
 	})
 

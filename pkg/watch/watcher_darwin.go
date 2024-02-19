@@ -20,12 +20,12 @@
 package watch
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsevents"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -121,8 +121,8 @@ func newWatcher(paths []string, ignore PathMatcher) (Notify, error) {
 	dw := &fseventNotify{
 		ignore: ignore,
 		stream: &fsevents.EventStream{
-			Latency: 1 * time.Millisecond,
-			Flags:   fsevents.FileEvents,
+			Latency: 50 * time.Millisecond,
+			Flags:   fsevents.FileEvents | fsevents.IgnoreSelf,
 			// NOTE(dmiller): this corresponds to the `sinceWhen` parameter in FSEventStreamCreate
 			// https://developer.apple.com/documentation/coreservices/1443980-fseventstreamcreate
 			EventID: fsevents.LatestEventID(),
@@ -136,7 +136,7 @@ func newWatcher(paths []string, ignore PathMatcher) (Notify, error) {
 	for _, path := range paths {
 		path, err := filepath.Abs(path)
 		if err != nil {
-			return nil, errors.Wrap(err, "newWatcher")
+			return nil, fmt.Errorf("newWatcher: %w", err)
 		}
 		dw.initAdd(path)
 	}
