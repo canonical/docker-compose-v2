@@ -7,7 +7,7 @@ concurrency:
 on:
   push:
     branches:
-      - 'v2'
+      - 'main'
     tags:
       - 'v*'
   pull_request:
@@ -19,7 +19,7 @@ on:
         default: "false"
 
 env:
-  DOCKER_CLI_VERSION: "20.10.17"
+  DOCKER_CLI_VERSION: "25.0.1"
 
 permissions:
   contents: read # to fetch code (actions/checkout)
@@ -138,11 +138,20 @@ jobs:
         mode:
           - plugin
           - standalone
-          - cucumber
+        engine:
+          - 24.0.9
+          - 25.0.2
     steps:
       -
         name: Checkout
         uses: actions/checkout@v3
+      - name: Install Docker ${{ matrix.engine }}
+        run: |
+          sudo apt-get install curl
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh ./get-docker.sh --version ${{ matrix.engine }}
+      - name: Check Docker Version
+        run: docker --version
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -198,11 +207,6 @@ jobs:
           rm -f /usr/local/bin/docker-compose
           cp bin/build/docker-compose /usr/local/bin
           make e2e-compose-standalone
-      -
-        name: Run cucumber tests
-        if: ${{ matrix.mode == 'cucumber'}}
-        run: |
-          make test-cucumber
 
   coverage:
     runs-on: ubuntu-22.04

@@ -19,32 +19,32 @@ package compose
 import (
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"gotest.tools/v3/assert"
 )
 
 func TestFilterServices(t *testing.T) {
 	p := &types.Project{
-		Services: []types.ServiceConfig{
-			{
+		Services: types.Services{
+			"foo": {
 				Name:  "foo",
 				Links: []string{"bar"},
 			},
-			{
+			"bar": {
 				Name: "bar",
 				DependsOn: map[string]types.ServiceDependency{
 					"zot": {},
 				},
 			},
-			{
+			"zot": {
 				Name: "zot",
 			},
-			{
+			"qix": {
 				Name: "qix",
 			},
 		},
 	}
-	err := p.ForServices([]string{"bar"})
+	p, err := p.WithSelectedServices([]string{"bar"})
 	assert.NilError(t, err)
 
 	assert.Equal(t, len(p.Services), 2)

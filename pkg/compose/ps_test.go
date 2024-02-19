@@ -21,7 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	containerType "github.com/docker/docker/api/types/container"
+	"go.uber.org/mock/gomock"
 	"gotest.tools/v3/assert"
 
 	compose "github.com/docker/compose/v2/pkg/api"
@@ -41,7 +42,7 @@ func TestPs(t *testing.T) {
 	ctx := context.Background()
 	args := filters.NewArgs(projectFilter(strings.ToLower(testProject)), hasConfigHashLabel())
 	args.Add("label", "com.docker.compose.oneoff=False")
-	listOpts := moby.ContainerListOptions{Filters: args, All: false}
+	listOpts := containerType.ListOptions{Filters: args, All: false}
 	c1, inspect1 := containerDetails("service1", "123", "running", "healthy", 0)
 	c2, inspect2 := containerDetails("service1", "456", "running", "", 0)
 	c2.Ports = []moby.Port{{PublicPort: 80, PrivatePort: 90, IP: "localhost"}}
@@ -54,13 +55,34 @@ func TestPs(t *testing.T) {
 	containers, err := tested.Ps(ctx, strings.ToLower(testProject), compose.PsOptions{})
 
 	expected := []compose.ContainerSummary{
-		{ID: "123", Name: "123", Image: "foo", Project: strings.ToLower(testProject), Service: "service1",
-			State: "running", Health: "healthy", Publishers: nil},
-		{ID: "456", Name: "456", Image: "foo", Project: strings.ToLower(testProject), Service: "service1",
+		{ID: "123", Name: "123", Names: []string{"/123"}, Image: "foo", Project: strings.ToLower(testProject), Service: "service1",
+			State: "running", Health: "healthy", Publishers: nil,
+			Labels: map[string]string{
+				compose.ProjectLabel:     strings.ToLower(testProject),
+				compose.ConfigFilesLabel: "/src/pkg/compose/testdata/compose.yaml",
+				compose.WorkingDirLabel:  "/src/pkg/compose/testdata",
+				compose.ServiceLabel:     "service1",
+			},
+		},
+		{ID: "456", Name: "456", Names: []string{"/456"}, Image: "foo", Project: strings.ToLower(testProject), Service: "service1",
 			State: "running", Health: "",
-			Publishers: []compose.PortPublisher{{URL: "localhost", TargetPort: 90, PublishedPort: 80}}},
-		{ID: "789", Name: "789", Image: "foo", Project: strings.ToLower(testProject), Service: "service2",
-			State: "exited", Health: "", ExitCode: 130, Publishers: nil},
+			Publishers: []compose.PortPublisher{{URL: "localhost", TargetPort: 90, PublishedPort: 80}},
+			Labels: map[string]string{
+				compose.ProjectLabel:     strings.ToLower(testProject),
+				compose.ConfigFilesLabel: "/src/pkg/compose/testdata/compose.yaml",
+				compose.WorkingDirLabel:  "/src/pkg/compose/testdata",
+				compose.ServiceLabel:     "service1",
+			},
+		},
+		{ID: "789", Name: "789", Names: []string{"/789"}, Image: "foo", Project: strings.ToLower(testProject), Service: "service2",
+			State: "exited", Health: "", ExitCode: 130, Publishers: nil,
+			Labels: map[string]string{
+				compose.ProjectLabel:     strings.ToLower(testProject),
+				compose.ConfigFilesLabel: "/src/pkg/compose/testdata/compose.yaml",
+				compose.WorkingDirLabel:  "/src/pkg/compose/testdata",
+				compose.ServiceLabel:     "service2",
+			},
+		},
 	}
 	assert.NilError(t, err)
 	assert.DeepEqual(t, containers, expected)
