@@ -24,28 +24,31 @@ import (
 	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/cmd/cmdtrace"
+	"github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
 	"github.com/docker/compose/v2/cmd/compatibility"
 	commands "github.com/docker/compose/v2/cmd/compose"
 	"github.com/docker/compose/v2/internal"
-	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/compose"
 )
 
 func pluginMain() {
 	plugin.Run(func(dockerCli command.Cli) *cobra.Command {
-		serviceProxy := api.NewServiceProxy().WithService(compose.NewComposeService(dockerCli))
-		cmd := commands.RootCommand(dockerCli, serviceProxy)
+		backend := compose.NewComposeService(dockerCli)
+		cmd := commands.RootCommand(dockerCli, backend)
 		originalPreRun := cmd.PersistentPreRunE
 		cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 			// initialize the dockerCli instance
 			if err := plugin.PersistentPreRunE(cmd, args); err != nil {
 				return err
 			}
+			// compose-specific initialization
+			dockerCliPostInitialize(dockerCli)
+
 			// TODO(milas): add an env var to enable logging from the
 			// OTel components for debugging purposes
-			_ = cmdtrace.Setup(cmd, dockerCli)
+			_ = cmdtrace.Setup(cmd, dockerCli, os.Args[1:])
 
 			if originalPreRun != nil {
 				return originalPreRun(cmd, args)
@@ -66,6 +69,22 @@ func pluginMain() {
 			Vendor:        "Docker Inc.",
 			Version:       internal.Version,
 		})
+}
+
+// dockerCliPostInitialize performs Compose-specific configuration for the
+// command.Cli instance provided by the plugin.Run() initialization.
+//
+// NOTE: This must be called AFTER plugin.PersistentPreRunE.
+func dockerCliPostInitialize(dockerCli command.Cli) {
+	// HACK(milas): remove once docker/cli#4574 is merged; for now,
+	// set it in a rather roundabout way by grabbing the underlying
+	// concrete client and manually invoking an option on it
+	_ = dockerCli.Apply(func(cli *command.DockerCli) error {
+		if mobyClient, ok := cli.Client().(*client.Client); ok {
+			_ = client.WithUserAgent("compose/" + internal.Version)(mobyClient)
+		}
+		return nil
+	})
 }
 
 func main() {

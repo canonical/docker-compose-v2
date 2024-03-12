@@ -26,7 +26,7 @@ import (
 
 	"github.com/docker/compose/v2/pkg/api"
 
-	composetypes "github.com/compose-spec/compose-go/types"
+	composetypes "github.com/compose-spec/compose-go/v2/types"
 	moby "github.com/docker/docker/api/types"
 	mountTypes "github.com/docker/docker/api/types/mount"
 
@@ -98,51 +98,11 @@ func TestPrepareNetworkLabels(t *testing.T) {
 	}))
 }
 
-func TestPrepareVolumes(t *testing.T) {
-	t.Run("adds dependency condition if service depends on volume from another service", func(t *testing.T) {
-		project := composetypes.Project{
-			Name: "myProject",
-			Services: []composetypes.ServiceConfig{
-				{
-					Name:        "aService",
-					VolumesFrom: []string{"anotherService"},
-				},
-				{
-					Name: "anotherService",
-				},
-			},
-		}
-		err := prepareVolumes(&project)
-		assert.NilError(t, err)
-		assert.Equal(t, project.Services[0].DependsOn["anotherService"].Condition, composetypes.ServiceConditionStarted)
-	})
-	t.Run("doesn't overwrite existing dependency condition", func(t *testing.T) {
-		project := composetypes.Project{
-			Name: "myProject",
-			Services: []composetypes.ServiceConfig{
-				{
-					Name:        "aService",
-					VolumesFrom: []string{"anotherService"},
-					DependsOn: map[string]composetypes.ServiceDependency{
-						"anotherService": {Condition: composetypes.ServiceConditionHealthy, Required: true},
-					},
-				},
-				{
-					Name: "anotherService",
-				},
-			},
-		}
-		err := prepareVolumes(&project)
-		assert.NilError(t, err)
-		assert.Equal(t, project.Services[0].DependsOn["anotherService"].Condition, composetypes.ServiceConditionHealthy)
-	})
-}
-
 func TestBuildContainerMountOptions(t *testing.T) {
 	project := composetypes.Project{
 		Name: "myProject",
-		Services: []composetypes.ServiceConfig{
-			{
+		Services: composetypes.Services{
+			"myService": {
 				Name: "myService",
 				Volumes: []composetypes.ServiceVolumeConfig{
 					{
@@ -184,7 +144,7 @@ func TestBuildContainerMountOptions(t *testing.T) {
 		},
 	}
 
-	mounts, err := buildContainerMountOptions(project, project.Services[0], moby.ImageInspect{}, inherit)
+	mounts, err := buildContainerMountOptions(project, project.Services["myService"], moby.ImageInspect{}, inherit)
 	sort.Slice(mounts, func(i, j int) bool {
 		return mounts[i].Target < mounts[j].Target
 	})
@@ -194,7 +154,7 @@ func TestBuildContainerMountOptions(t *testing.T) {
 	assert.Equal(t, mounts[1].Target, "/var/myvolume2")
 	assert.Equal(t, mounts[2].Target, "\\\\.\\pipe\\docker_engine")
 
-	mounts, err = buildContainerMountOptions(project, project.Services[0], moby.ImageInspect{}, inherit)
+	mounts, err = buildContainerMountOptions(project, project.Services["myService"], moby.ImageInspect{}, inherit)
 	sort.Slice(mounts, func(i, j int) bool {
 		return mounts[i].Target < mounts[j].Target
 	})
@@ -220,8 +180,8 @@ func TestDefaultNetworkSettings(t *testing.T) {
 		}
 		project := composetypes.Project{
 			Name: "myProject",
-			Services: []composetypes.ServiceConfig{
-				service,
+			Services: composetypes.Services{
+				"myService": service,
 			},
 			Networks: composetypes.Networks(map[string]composetypes.NetworkConfig{
 				"myNetwork1": {
@@ -233,7 +193,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "myProject_myNetwork2")
 		assert.Check(t, cmp.Len(networkConfig.EndpointsConfig, 1))
 		assert.Check(t, cmp.Contains(networkConfig.EndpointsConfig, "myProject_myNetwork2"))
@@ -245,8 +205,8 @@ func TestDefaultNetworkSettings(t *testing.T) {
 		}
 		project := composetypes.Project{
 			Name: "myProject",
-			Services: []composetypes.ServiceConfig{
-				service,
+			Services: composetypes.Services{
+				"myService": service,
 			},
 			Networks: composetypes.Networks(map[string]composetypes.NetworkConfig{
 				"myNetwork1": {
@@ -261,7 +221,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "myProject_default")
 		assert.Check(t, cmp.Len(networkConfig.EndpointsConfig, 1))
 		assert.Check(t, cmp.Contains(networkConfig.EndpointsConfig, "myProject_default"))
@@ -273,12 +233,12 @@ func TestDefaultNetworkSettings(t *testing.T) {
 		}
 		project := composetypes.Project{
 			Name: "myProject",
-			Services: []composetypes.ServiceConfig{
-				service,
+			Services: composetypes.Services{
+				"myService": service,
 			},
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "none")
 		assert.Check(t, cmp.Nil(networkConfig))
 	})
@@ -290,7 +250,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 		}
 		project := composetypes.Project{
 			Name:     "myProject",
-			Services: []composetypes.ServiceConfig{service},
+			Services: composetypes.Services{"myService": service},
 			Networks: composetypes.Networks(map[string]composetypes.NetworkConfig{
 				"default": {
 					Name: "myProject_default",
@@ -298,7 +258,7 @@ func TestDefaultNetworkSettings(t *testing.T) {
 			}),
 		}
 
-		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true)
+		networkMode, networkConfig := defaultNetworkSettings(&project, service, 1, nil, true, "1.43")
 		assert.Equal(t, string(networkMode), "host")
 		assert.Check(t, cmp.Nil(networkConfig))
 	})

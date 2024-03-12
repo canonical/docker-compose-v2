@@ -1,3 +1,16 @@
+docker-compose-v2 (2.24.6+ds1-0ubuntu1) noble; urgency=medium
+
+  * New upstream release.
+  * d/p/fix-build.patch: refresh against new upstream release.
+  * Build with Go 1.21, recommended by upstream.
+    - d/control: b-d on golang-1.21-go instead of golang-go.
+    - d/rules: add Go 1.21 binary to the $PATH.
+  * d/docker-compose-v2.docs: remove NOTICE file from a vendorized dependency
+    that was removed.
+  * d/copyright: remove superfluous file patterns.
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Mon, 19 Feb 2024 17:56:31 -0300
+
 docker-compose-v2 (2.20.2+ds1-0ubuntu1~20.04.1) focal; urgency=medium
 
   * Backport version from Mantic to Focal (LP: #1968035, #2036350).

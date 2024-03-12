@@ -18,6 +18,7 @@ package compose
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/docker/compose/v2/pkg/api"
 )
@@ -33,33 +34,48 @@ type logPrinter interface {
 type printer struct {
 	queue    chan api.ContainerEvent
 	consumer api.LogConsumer
-	stopCh   chan struct{}
+	stopCh   chan struct{} // stopCh is a signal channel for producers to stop sending events to the queue
+	stop     sync.Once
 }
 
 // newLogPrinter builds a LogPrinter passing containers logs to LogConsumer
 func newLogPrinter(consumer api.LogConsumer) logPrinter {
-	queue := make(chan api.ContainerEvent)
-	stopCh := make(chan struct{}, 1) // printer MAY stop on his own, so Stop MUST not be blocking
 	printer := printer{
 		consumer: consumer,
-		queue:    queue,
-		stopCh:   stopCh,
+		queue:    make(chan api.ContainerEvent),
+		stopCh:   make(chan struct{}),
+		stop:     sync.Once{},
 	}
 	return &printer
 }
 
 func (p *printer) Cancel() {
-	p.queue <- api.ContainerEvent{
-		Type: api.UserCancel,
-	}
+	// note: HandleEvent is used to ensure this doesn't deadlock
+	p.HandleEvent(api.ContainerEvent{Type: api.UserCancel})
 }
 
 func (p *printer) Stop() {
-	p.stopCh <- struct{}{}
+	p.stop.Do(func() {
+		close(p.stopCh)
+		for {
+			select {
+			case <-p.queue:
+				// purge the queue to free producers goroutines
+				// p.queue will be garbage collected
+			default:
+				return
+			}
+		}
+	})
 }
 
 func (p *printer) HandleEvent(event api.ContainerEvent) {
-	p.queue <- event
+	select {
+	case <-p.stopCh:
+		return
+	default:
+		p.queue <- event
+	}
 }
 
 //nolint:gocyclo
@@ -68,6 +84,8 @@ func (p *printer) Run(cascadeStop bool, exitCodeFrom string, stopFn func() error
 		aborting bool
 		exitCode int
 	)
+	defer p.Stop()
+
 	containers := map[string]struct{}{}
 	for {
 		select {

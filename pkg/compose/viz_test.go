@@ -21,9 +21,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
-	"github.com/golang/mock/gomock"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 
 	compose "github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/mocks"
@@ -33,8 +33,8 @@ func TestViz(t *testing.T) {
 	project := types.Project{
 		Name:       "viz-test",
 		WorkingDir: "/home",
-		Services: []types.ServiceConfig{
-			{
+		Services: types.Services{
+			"service1": {
 				Name:  "service1",
 				Image: "image-for-service1",
 				Ports: []types.ServicePortConfig{
@@ -53,12 +53,12 @@ func TestViz(t *testing.T) {
 					"internal": nil,
 				},
 			},
-			{
+			"service2": {
 				Name:  "service2",
 				Image: "image-for-service2",
 				Ports: []types.ServicePortConfig{},
 			},
-			{
+			"service3": {
 				Name:  "service3",
 				Image: "some-image",
 				DependsOn: map[string]types.ServiceDependency{
@@ -66,7 +66,7 @@ func TestViz(t *testing.T) {
 					"service1": {},
 				},
 			},
-			{
+			"service4": {
 				Name:  "service4",
 				Image: "another-image",
 				DependsOn: map[string]types.ServiceDependency{
@@ -82,7 +82,7 @@ func TestViz(t *testing.T) {
 					"external": nil,
 				},
 			},
-			{
+			"With host IP": {
 				Name:  "With host IP",
 				Image: "user/image-name",
 				DependsOn: map[string]types.ServiceDependency{
@@ -149,11 +149,12 @@ func TestViz(t *testing.T) {
 
 		// check edges that SHOULD exist in the generated graph
 		allowedEdges := make(map[string][]string)
-		for _, service := range project.Services {
-			allowedEdges[service.Name] = make([]string, 0, len(service.DependsOn))
+		for name, service := range project.Services {
+			allowed := make([]string, 0, len(service.DependsOn))
 			for depName := range service.DependsOn {
-				allowedEdges[service.Name] = append(allowedEdges[service.Name], depName)
+				allowed = append(allowed, depName)
 			}
+			allowedEdges[name] = allowed
 		}
 		for serviceName, dependencies := range allowedEdges {
 			for _, dependencyName := range dependencies {
@@ -163,12 +164,12 @@ func TestViz(t *testing.T) {
 
 		// check edges that SHOULD NOT exist in the generated graph
 		forbiddenEdges := make(map[string][]string)
-		for _, service := range project.Services {
-			forbiddenEdges[service.Name] = make([]string, 0, len(project.ServiceNames())-len(service.DependsOn))
+		for name, service := range project.Services {
+			forbiddenEdges[name] = make([]string, 0, len(project.ServiceNames())-len(service.DependsOn))
 			for _, serviceName := range project.ServiceNames() {
 				_, edgeExists := service.DependsOn[serviceName]
 				if !edgeExists {
-					forbiddenEdges[service.Name] = append(forbiddenEdges[service.Name], serviceName)
+					forbiddenEdges[name] = append(forbiddenEdges[name], serviceName)
 				}
 			}
 		}
