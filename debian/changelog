@@ -1,3 +1,9 @@
+docker-compose-v2 (2.24.6+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
+
+  * Backport version from Noble to Jammy (LP: #2040460).
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 12 Mar 2024 18:08:11 -0300
+
 docker-compose-v2 (2.24.6+ds1-0ubuntu1) noble; urgency=medium
 
   * New upstream release.
