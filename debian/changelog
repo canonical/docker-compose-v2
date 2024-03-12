@@ -1,3 +1,9 @@
+docker-compose-v2 (2.24.6+ds1-0ubuntu1~23.10.1) mantic; urgency=medium
+
+  * Backport version from Noble to Mantic (LP: #2040460).
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 12 Mar 2024 18:05:12 -0300
+
 docker-compose-v2 (2.24.6+ds1-0ubuntu1) noble; urgency=medium
 
   * New upstream release.
