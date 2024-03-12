@@ -17,13 +17,11 @@ package sync
 import (
 	"context"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 )
 
 // PathMapping contains the Compose service and modified host system path.
 type PathMapping struct {
-	// Service that the file event is for.
-	Service string
 	// HostPath that was created/modified/deleted outside the container.
 	//
 	// This is the path as seen from the user's perspective, e.g.

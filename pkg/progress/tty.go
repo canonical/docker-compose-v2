@@ -33,17 +33,18 @@ import (
 )
 
 type ttyWriter struct {
-	out             io.Writer
-	events          map[string]Event
-	eventIDs        []string
-	repeated        bool
-	numLines        int
-	done            chan bool
-	mtx             *sync.Mutex
-	tailEvents      []string
-	dryRun          bool
-	skipChildEvents bool
-	progressTitle   string
+	out               io.Writer
+	events            map[string]Event
+	eventIDs          []string
+	repeated          bool
+	numLines          int
+	done              chan bool
+	mtx               *sync.Mutex
+	tailEvents        []string
+	dryRun            bool
+	skipChildEvents   bool
+	progressTitle     string
+	hasFollowupAction bool
 }
 
 func (w *ttyWriter) Start(ctx context.Context) error {
@@ -70,18 +71,34 @@ func (w *ttyWriter) Stop() {
 	w.done <- true
 }
 
+func (w *ttyWriter) HasMore(b bool) {
+	w.hasFollowupAction = b
+}
+
 func (w *ttyWriter) Event(e Event) {
 	w.mtx.Lock()
 	defer w.mtx.Unlock()
+	w.event(e)
+}
+
+func (w *ttyWriter) event(e Event) {
 	if !utils.StringContains(w.eventIDs, e.ID) {
 		w.eventIDs = append(w.eventIDs, e.ID)
 	}
 	if _, ok := w.events[e.ID]; ok {
 		last := w.events[e.ID]
+		if e.Status == Done && w.hasFollowupAction {
+			e.Status = Working
+		}
 		switch e.Status {
 		case Done, Error, Warning:
-			if last.Status != e.Status {
+			if last.endTime.IsZero() {
 				last.stop()
+			}
+		case Working:
+			if !last.endTime.IsZero() {
+				// already done, don't overwrite
+				return
 			}
 		}
 		last.Status = e.Status
@@ -106,8 +123,10 @@ func (w *ttyWriter) Event(e Event) {
 }
 
 func (w *ttyWriter) Events(events []Event) {
+	w.mtx.Lock()
+	defer w.mtx.Unlock()
 	for _, e := range events {
-		w.Event(e)
+		w.event(e)
 	}
 }
 

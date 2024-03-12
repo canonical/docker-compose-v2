@@ -21,7 +21,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/docker/cli/cli/command"
 	"github.com/morikuni/aec"
 	"github.com/spf13/cobra"
 
@@ -37,9 +38,10 @@ type pullOptions struct {
 	includeDeps        bool
 	ignorePullFailures bool
 	noBuildable        bool
+	policy             string
 }
 
-func pullCommand(p *ProjectOptions, backend api.Service) *cobra.Command {
+func pullCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
 	opts := pullOptions{
 		ProjectOptions: p,
 	}
@@ -53,33 +55,53 @@ func pullCommand(p *ProjectOptions, backend api.Service) *cobra.Command {
 			return nil
 		}),
 		RunE: Adapt(func(ctx context.Context, args []string) error {
-			return runPull(ctx, backend, opts, args)
+			return runPull(ctx, dockerCli, backend, opts, args)
 		}),
-		ValidArgsFunction: completeServiceNames(p),
+		ValidArgsFunction: completeServiceNames(dockerCli, p),
 	}
 	flags := cmd.Flags()
-	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Pull without printing progress information.")
-	cmd.Flags().BoolVar(&opts.includeDeps, "include-deps", false, "Also pull services declared as dependencies.")
-	cmd.Flags().BoolVar(&opts.parallel, "parallel", true, "DEPRECATED pull multiple images in parallel.")
+	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Pull without printing progress information")
+	cmd.Flags().BoolVar(&opts.includeDeps, "include-deps", false, "Also pull services declared as dependencies")
+	cmd.Flags().BoolVar(&opts.parallel, "parallel", true, "DEPRECATED pull multiple images in parallel")
 	flags.MarkHidden("parallel") //nolint:errcheck
-	cmd.Flags().BoolVar(&opts.parallel, "no-parallel", true, "DEPRECATED disable parallel pulling.")
+	cmd.Flags().BoolVar(&opts.parallel, "no-parallel", true, "DEPRECATED disable parallel pulling")
 	flags.MarkHidden("no-parallel") //nolint:errcheck
-	cmd.Flags().BoolVar(&opts.ignorePullFailures, "ignore-pull-failures", false, "Pull what it can and ignores images with pull failures.")
-	cmd.Flags().BoolVar(&opts.noBuildable, "ignore-buildable", false, "Ignore images that can be built.")
+	cmd.Flags().BoolVar(&opts.ignorePullFailures, "ignore-pull-failures", false, "Pull what it can and ignores images with pull failures")
+	cmd.Flags().BoolVar(&opts.noBuildable, "ignore-buildable", false, "Ignore images that can be built")
+	cmd.Flags().StringVar(&opts.policy, "policy", "", `Apply pull policy ("missing"|"always")`)
 	return cmd
 }
 
-func runPull(ctx context.Context, backend api.Service, opts pullOptions, services []string) error {
-	project, err := opts.ToProject(services)
+func (opts pullOptions) apply(project *types.Project, services []string) (*types.Project, error) {
+	if !opts.includeDeps {
+		var err error
+		project, err = project.WithSelectedServices(services, types.IgnoreDependencies)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if opts.policy != "" {
+		for i, service := range project.Services {
+			if service.Image == "" {
+				continue
+			}
+			service.PullPolicy = opts.policy
+			project.Services[i] = service
+		}
+	}
+	return project, nil
+}
+
+func runPull(ctx context.Context, dockerCli command.Cli, backend api.Service, opts pullOptions, services []string) error {
+	project, _, err := opts.ToProject(ctx, dockerCli, services)
 	if err != nil {
 		return err
 	}
 
-	if !opts.includeDeps {
-		err := project.ForServices(services, types.IgnoreDependencies)
-		if err != nil {
-			return err
-		}
+	project, err = opts.apply(project, services)
+	if err != nil {
+		return err
 	}
 
 	return backend.Pull(ctx, project, api.PullOptions{

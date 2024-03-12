@@ -171,15 +171,6 @@ Copyright: 2020 The Compose Specification Authors
            2013-2017 Docker, Inc
 License: Apache-2.0
 
-Files: vendor/github.com/compose-spec/compose-go/dotenv/*
-Copyright: 2013 John Barton
-License: Expat
-
-Files: vendor/github.com/compose-spec/compose-go/loader/windows_path.go
-Copyright: 2020 The Compose Specification Authors
-           2010 The Go Authors
-License: Apache-2.0 and BSD-3-clause-Google
-
 Files: vendor/github.com/aws/smithy-go/*
 Copyright: Amazon.com, Inc. or its affiliates
 License: Apache-2.0
@@ -214,11 +205,6 @@ License: BSD-3-clause-Google
 Files: vendor/github.com/klauspost/compress/zstd/internal/xxhash/*
 Copyright: 2016 Caleb Spare
 License: Expat
-
-Files: vendor/github.com/cyphar/filepath-securejoin/*
-Copyright: 2017 SUSE LLC
-           2014-2015 Docker Inc & Go Authors
-License: BSD-3-clause-Google
 
 Files: vendor/github.com/moby/*
 Copyright: 2012-2021 Docker Inc
@@ -323,14 +309,6 @@ Files: vendor/github.com/gofrs/flock/flock_aix.go
 Copyright: 2019 Tim Heckman
            2018 The Go Authors
 License: BSD-3-clause-Generic
-
-Files: vendor/github.com/gofrs/uuid/*
-Copyright: 2013-2018 Maxim Bublis <b@codemonkey.ru>
-License: Expat
-
-Files: vendor/github.com/gofrs/uuid/fuzz.go
-Copyright: 2018 Andrei Tudor Călin <mail@acln.ro>
-License: Expat
 
 Files: vendor/github.com/morikuni/aec/*
 Copyright: 2016 Taihei Morikuni
@@ -441,18 +419,6 @@ Files: vendor/github.com/cenkalti/backoff/v4/*
 Copyright: 2014 Cenk Altı
 License: Expat
 
-Files: vendor/github.com/cucumber/gherkin-go/v19/*
-Copyright: Cucumber Ltd, Gaspar Nagy, Björn Rasmusson, Peter Sergeant
-License: Expat
-
-Files: vendor/github.com/cucumber/godog/*
-Copyright: SmartBear
-License: Expat
-
-Files: vendor/github.com/cucumber/messages-go/v16/*
-Copyright: Cucumber Ltd
-License: Expat
-
 Files: vendor/github.com/go-logr/*
 Copyright: 2019-2021 The logr Authors
 License: Apache-2.0
@@ -538,10 +504,6 @@ Files: vendor/github.com/Azure/go-ansiterm/*
 Copyright: 2015 Microsoft Corporation
 License: Expat
 
-Files: vendor/github.com/distribution/distribution/v3/*
-Copyright: The containerd Authors
-License: Apache-2.0
-
 Files: vendor/github.com/grpc-ecosystem/go-grpc-middleware/*
 Copyright: 2016 Michal Witkowski
 License: Apache-2.0
@@ -554,10 +516,6 @@ Files: vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/pattern.go
 Copyright: 2009 The Go Authors
            2015, Gengo, Inc
 License: BSD-3-clause-Generic
-
-Files: vendor/github.com/golang/mock/*
-Copyright: 2010-2011 Google Inc
-License: Apache-2.0
 
 Files: vendor/github.com/golang/protobuf/*
 Copyright: 2010-2019 The Go Authors
@@ -582,10 +540,6 @@ License: Apache-2.0
 
 Files: vendor/github.com/opencontainers/image-spec/*
 Copyright: 2016-2022 The Linux Foundation
-License: Apache-2.0
-
-Files: vendor/github.com/opencontainers/runc/*
-Copyright: 2012-2015 Docker, Inc
 License: Apache-2.0
 
 Files: vendor/github.com/imdario/mergo/*

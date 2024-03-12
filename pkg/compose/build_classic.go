@@ -19,6 +19,7 @@ package compose
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,9 +27,11 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/docker/cli/cli/command"
+
 	"github.com/docker/docker/api/types/registry"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command/image/build"
 	dockertypes "github.com/docker/docker/api/types"
@@ -39,13 +42,12 @@ import (
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
-	"github.com/pkg/errors"
 
 	"github.com/docker/compose/v2/pkg/api"
 )
 
 //nolint:gocyclo
-func (s *composeService) doBuildClassic(ctx context.Context, projectName string, service types.ServiceConfig, options api.BuildOptions) (string, error) {
+func (s *composeService) doBuildClassic(ctx context.Context, project *types.Project, service types.ServiceConfig, options api.BuildOptions) (string, error) {
 	var (
 		buildCtx      io.ReadCloser
 		dockerfileCtx io.ReadCloser
@@ -62,19 +64,19 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 	buildBuff := s.stdout()
 
 	if len(service.Build.Platforms) > 1 {
-		return "", errors.Errorf("the classic builder doesn't support multi-arch build, set DOCKER_BUILDKIT=1 to use BuildKit")
+		return "", fmt.Errorf("the classic builder doesn't support multi-arch build, set DOCKER_BUILDKIT=1 to use BuildKit")
 	}
 	if service.Build.Privileged {
-		return "", errors.Errorf("the classic builder doesn't support privileged mode, set DOCKER_BUILDKIT=1 to use BuildKit")
+		return "", fmt.Errorf("the classic builder doesn't support privileged mode, set DOCKER_BUILDKIT=1 to use BuildKit")
 	}
 	if len(service.Build.AdditionalContexts) > 0 {
-		return "", errors.Errorf("the classic builder doesn't support additional contexts, set DOCKER_BUILDKIT=1 to use BuildKit")
+		return "", fmt.Errorf("the classic builder doesn't support additional contexts, set DOCKER_BUILDKIT=1 to use BuildKit")
 	}
 	if len(service.Build.SSH) > 0 {
-		return "", errors.Errorf("the classic builder doesn't support SSH keys, set DOCKER_BUILDKIT=1 to use BuildKit")
+		return "", fmt.Errorf("the classic builder doesn't support SSH keys, set DOCKER_BUILDKIT=1 to use BuildKit")
 	}
 	if len(service.Build.Secrets) > 0 {
-		return "", errors.Errorf("the classic builder doesn't support secrets, set DOCKER_BUILDKIT=1 to use BuildKit")
+		return "", fmt.Errorf("the classic builder doesn't support secrets, set DOCKER_BUILDKIT=1 to use BuildKit")
 	}
 
 	if service.Build.Labels == nil {
@@ -89,7 +91,7 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 			// Dockerfile is outside of build-context; read the Dockerfile and pass it as dockerfileCtx
 			dockerfileCtx, err = os.Open(dockerfileName)
 			if err != nil {
-				return "", errors.Errorf("unable to open Dockerfile: %v", err)
+				return "", fmt.Errorf("unable to open Dockerfile: %w", err)
 			}
 			defer dockerfileCtx.Close() //nolint:errcheck
 		}
@@ -98,11 +100,11 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 	case urlutil.IsURL(specifiedContext):
 		buildCtx, relDockerfile, err = build.GetContextFromURL(progBuff, specifiedContext, dockerfileName)
 	default:
-		return "", errors.Errorf("unable to prepare context: path %q not found", specifiedContext)
+		return "", fmt.Errorf("unable to prepare context: path %q not found", specifiedContext)
 	}
 
 	if err != nil {
-		return "", errors.Errorf("unable to prepare context: %s", err)
+		return "", fmt.Errorf("unable to prepare context: %w", err)
 	}
 
 	if tempDir != "" {
@@ -118,7 +120,7 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 		}
 
 		if err := build.ValidateContextDirectory(contextDir, excludes); err != nil {
-			return "", errors.Wrap(err, "checking context")
+			return "", fmt.Errorf("checking context: %w", err)
 		}
 
 		// And canonicalize dockerfile name to a platform-independent one
@@ -159,8 +161,8 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 	for k, auth := range creds {
 		authConfigs[k] = registry.AuthConfig(auth)
 	}
-	buildOptions := imageBuildOptions(service.Build)
-	imageName := api.GetImageNameOrDefault(service, projectName)
+	buildOptions := imageBuildOptions(s.dockerCli, project, service, options)
+	imageName := api.GetImageNameOrDefault(service, project.Name)
 	buildOptions.Tags = append(buildOptions.Tags, imageName)
 	buildOptions.Dockerfile = relDockerfile
 	buildOptions.AuthConfigs = authConfigs
@@ -186,7 +188,8 @@ func (s *composeService) doBuildClassic(ctx context.Context, projectName string,
 
 	err = jsonmessage.DisplayJSONMessagesStream(response.Body, buildBuff, progBuff.FD(), true, aux)
 	if err != nil {
-		if jerr, ok := err.(*jsonmessage.JSONError); ok {
+		var jerr *jsonmessage.JSONError
+		if errors.As(err, &jerr) {
 			// If no error code is set, default to 1
 			if jerr.Code == 0 {
 				jerr.Code = 1
@@ -215,17 +218,18 @@ func isLocalDir(c string) bool {
 	return err == nil
 }
 
-func imageBuildOptions(config *types.BuildConfig) dockertypes.ImageBuildOptions {
+func imageBuildOptions(dockerCli command.Cli, project *types.Project, service types.ServiceConfig, options api.BuildOptions) dockertypes.ImageBuildOptions {
+	config := service.Build
 	return dockertypes.ImageBuildOptions{
 		Version:     dockertypes.BuilderV1,
 		Tags:        config.Tags,
 		NoCache:     config.NoCache,
 		Remove:      true,
 		PullParent:  config.Pull,
-		BuildArgs:   config.Args,
+		BuildArgs:   resolveAndMergeBuildArgs(dockerCli, project, service, options),
 		Labels:      config.Labels,
 		NetworkMode: config.Network,
-		ExtraHosts:  config.ExtraHosts.AsList(),
+		ExtraHosts:  config.ExtraHosts.AsList(":"),
 		Target:      config.Target,
 		Isolation:   container.Isolation(config.Isolation),
 	}

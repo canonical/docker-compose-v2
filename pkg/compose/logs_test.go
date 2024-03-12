@@ -23,14 +23,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/compose-spec/compose-go/types"
+	"github.com/compose-spec/compose-go/v2/types"
 	moby "github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
+	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	compose "github.com/docker/compose/v2/pkg/api"
 )
@@ -47,7 +47,7 @@ func TestComposeService_Logs_Demux(t *testing.T) {
 	name := strings.ToLower(testProject)
 
 	ctx := context.Background()
-	api.EXPECT().ContainerList(ctx, moby.ContainerListOptions{
+	api.EXPECT().ContainerList(ctx, containerType.ListOptions{
 		All:     true,
 		Filters: filters.NewArgs(oneOffFilter(false), projectFilter(name), hasConfigHashLabel()),
 	}).Return(
@@ -61,7 +61,7 @@ func TestComposeService_Logs_Demux(t *testing.T) {
 		ContainerInspect(anyCancellableContext(), "c").
 		Return(moby.ContainerJSON{
 			ContainerJSONBase: &moby.ContainerJSONBase{ID: "c"},
-			Config:            &container.Config{Tty: false},
+			Config:            &containerType.Config{Tty: false},
 		}, nil)
 	c1Reader, c1Writer := io.Pipe()
 	t.Cleanup(func() {
@@ -71,9 +71,9 @@ func TestComposeService_Logs_Demux(t *testing.T) {
 	c1Stdout := stdcopy.NewStdWriter(c1Writer, stdcopy.Stdout)
 	c1Stderr := stdcopy.NewStdWriter(c1Writer, stdcopy.Stderr)
 	go func() {
-		_, err := c1Stdout.Write([]byte("hello\n stdout"))
+		_, err := c1Stdout.Write([]byte("hello stdout\n"))
 		assert.NoError(t, err, "Writing to fake stdout")
-		_, err = c1Stderr.Write([]byte("hello\n stderr"))
+		_, err = c1Stderr.Write([]byte("hello stderr\n"))
 		assert.NoError(t, err, "Writing to fake stderr")
 		_ = c1Writer.Close()
 	}()
@@ -83,7 +83,7 @@ func TestComposeService_Logs_Demux(t *testing.T) {
 	opts := compose.LogOptions{
 		Project: &types.Project{
 			Services: types.Services{
-				{Name: "service"},
+				"service": {Name: "service"},
 			},
 		},
 	}
@@ -94,7 +94,7 @@ func TestComposeService_Logs_Demux(t *testing.T) {
 
 	require.Equal(
 		t,
-		[]string{"hello", " stdout", "hello", " stderr"},
+		[]string{"hello stdout", "hello stderr"},
 		consumer.LogsForContainer("c"),
 	)
 }
@@ -118,7 +118,7 @@ func TestComposeService_Logs_ServiceFiltering(t *testing.T) {
 	name := strings.ToLower(testProject)
 
 	ctx := context.Background()
-	api.EXPECT().ContainerList(ctx, moby.ContainerListOptions{
+	api.EXPECT().ContainerList(ctx, containerType.ListOptions{
 		All:     true,
 		Filters: filters.NewArgs(oneOffFilter(false), projectFilter(name), hasConfigHashLabel()),
 	}).Return(
@@ -140,7 +140,7 @@ func TestComposeService_Logs_ServiceFiltering(t *testing.T) {
 			Return(
 				moby.ContainerJSON{
 					ContainerJSONBase: &moby.ContainerJSONBase{ID: id},
-					Config:            &container.Config{Tty: true},
+					Config:            &containerType.Config{Tty: true},
 				},
 				nil,
 			)
@@ -153,8 +153,8 @@ func TestComposeService_Logs_ServiceFiltering(t *testing.T) {
 	// reference `serviceB` even though it has running services for this proj
 	proj := &types.Project{
 		Services: types.Services{
-			{Name: "serviceA"},
-			{Name: "serviceC"},
+			"serviceA": {Name: "serviceA"},
+			"serviceC": {Name: "serviceC"},
 		},
 	}
 	consumer := &testLogConsumer{}
@@ -172,7 +172,7 @@ func TestComposeService_Logs_ServiceFiltering(t *testing.T) {
 
 type testLogConsumer struct {
 	mu sync.Mutex
-	// logs is keyed container; values are log lines
+	// logs is keyed by container ID; values are log lines
 	logs map[string][]string
 }
 
