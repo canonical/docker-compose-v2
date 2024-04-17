@@ -12,8 +12,8 @@ export GOCACHE := $(CURDIR)/.gocache
 # https://blog.golang.org/go116-module-changes (TODO figure out a new solution for Go 1.17+)
 export GO111MODULE := auto
 
-# Build with Golang 1.21
-export PATH := /usr/lib/go-1.21/bin:$(PATH)
+# Build with Golang 1.22
+export PATH := /usr/lib/go-1.22/bin:$(PATH)
 
 override_dh_gencontrol:
 	echo 'libc:Built-Using=$(shell dpkg-query -f '$${source:Package} (= $${source:Version})' -W libc-dev-bin)' >> debian/docker-compose-v2.substvars
