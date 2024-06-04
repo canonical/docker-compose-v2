@@ -5,6 +5,7 @@
 //
 //	mockgen -destination pkg/mocks/mock_docker_compose_api.go -package mocks -source=./pkg/api/api.go Service
 //
+
 // Package mocks is a generated GoMock package.
 package mocks
 
@@ -66,21 +67,6 @@ func (m *MockService) Build(ctx context.Context, project *types.Project, options
 func (mr *MockServiceMockRecorder) Build(ctx, project, options any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Build", reflect.TypeOf((*MockService)(nil).Build), ctx, project, options)
-}
-
-// Config mocks base method.
-func (m *MockService) Config(ctx context.Context, project *types.Project, options api.ConfigOptions) ([]byte, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Config", ctx, project, options)
-	ret0, _ := ret[0].([]byte)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// Config indicates an expected call of Config.
-func (mr *MockServiceMockRecorder) Config(ctx, project, options any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Config", reflect.TypeOf((*MockService)(nil).Config), ctx, project, options)
 }
 
 // Copy mocks base method.

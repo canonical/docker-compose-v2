@@ -22,12 +22,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/docker/compose/v2/internal/desktop"
+	pathutil "github.com/docker/compose/v2/internal/paths"
 	moby "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/blkiodev"
 	"github.com/docker/docker/api/types/container"
@@ -41,8 +46,6 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/docker/go-units"
 	"github.com/sirupsen/logrus"
-
-	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
@@ -74,8 +77,13 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 		options.Services = project.ServiceNames()
 	}
 
+	err := project.CheckContainerNameUnicity()
+	if err != nil {
+		return err
+	}
+
 	var observedState Containers
-	observedState, err := s.getContainers(ctx, project.Name, oneOffInclude, true)
+	observedState, err = s.getContainers(ctx, project.Name, oneOffInclude, true)
 	if err != nil {
 		return err
 	}
@@ -110,7 +118,6 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 				"--remove-orphans flag to clean it up.", orphans.names())
 		}
 	}
-
 	return newConvergence(options.Services, observedState, s).apply(ctx, project, options)
 }
 
@@ -143,6 +150,60 @@ func (s *composeService) ensureProjectVolumes(ctx context.Context, project *type
 		if err != nil {
 			return err
 		}
+	}
+
+	err := func() error {
+		if s.manageDesktopFileSharesEnabled(ctx) {
+			// collect all the bind mount paths and try to set up file shares in
+			// Docker Desktop for them
+			var paths []string
+			for _, svcName := range project.ServiceNames() {
+				svc := project.Services[svcName]
+				for _, vol := range svc.Volumes {
+					if vol.Type != string(mount.TypeBind) {
+						continue
+					}
+					p := filepath.Clean(vol.Source)
+					if !filepath.IsAbs(p) {
+						return fmt.Errorf("file share path is not absolute: %s", p)
+					}
+					if fi, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+						// actual directory will be implicitly created when the
+						// file share is initialized if it doesn't exist, so
+						// need to filter out any that should not be auto-created
+						if vol.Bind != nil && !vol.Bind.CreateHostPath {
+							logrus.Debugf("Skipping creating file share for %q: does not exist and `create_host_path` is false", p)
+							continue
+						}
+					} else if err != nil {
+						// if we can't read the path, we won't be able ot make
+						// a file share for it
+						logrus.Debugf("Skipping creating file share for %q: %v", p, err)
+						continue
+					} else if !fi.IsDir() {
+						// ignore files & special types (e.g. Unix sockets)
+						logrus.Debugf("Skipping creating file share for %q: not a directory", p)
+						continue
+					}
+
+					paths = append(paths, p)
+				}
+			}
+
+			// remove duplicate/unnecessary child paths and sort them for predictability
+			paths = pathutil.EncompassingPaths(paths)
+			sort.Strings(paths)
+
+			fileShareManager := desktop.NewFileShareManager(s.desktopCli, project.Name, paths)
+			if err := fileShareManager.EnsureExists(ctx); err != nil {
+				return fmt.Errorf("initializing file shares: %w", err)
+			}
+		}
+		return nil
+	}()
+
+	if err != nil {
+		progress.ContextWriter(ctx).TailMsgf("Failed to prepare Synchronized file shares: %v", err)
 	}
 	return nil
 }
@@ -258,6 +319,7 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 
 	hostConfig := container.HostConfig{
 		AutoRemove:     opts.AutoRemove,
+		Annotations:    service.Annotations,
 		Binds:          binds,
 		Mounts:         mounts,
 		CapAdd:         strslice.StrSlice(service.CapAdd),
@@ -377,6 +439,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 		ipv4Address string
 		ipv6Address string
 		macAddress  string
+		driverOpts  types.Options
 	)
 	if config != nil {
 		ipv4Address = config.Ipv4Address
@@ -387,6 +450,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 			LinkLocalIPs: config.LinkLocalIPs,
 		}
 		macAddress = config.MacAddress
+		driverOpts = config.DriverOpts
 	}
 	return &network.EndpointSettings{
 		Aliases:     getAliases(p, service, serviceIndex, networkKey, useNetworkAliases),
@@ -395,6 +459,7 @@ func createEndpointSettings(p *types.Project, service types.ServiceConfig, servi
 		IPv6Gateway: ipv6Address,
 		IPAMConfig:  ipam,
 		MacAddress:  macAddress,
+		DriverOpts:  driverOpts,
 	}
 }
 
@@ -661,10 +726,8 @@ func setLimits(limits *types.Resource, resources *container.Resources) {
 	if limits.MemoryBytes != 0 {
 		resources.Memory = int64(limits.MemoryBytes)
 	}
-	if limits.NanoCPUs != "" {
-		if f, err := strconv.ParseFloat(limits.NanoCPUs, 64); err == nil {
-			resources.NanoCPUs = int64(f * 1e9)
-		}
+	if limits.NanoCPUs != 0 {
+		resources.NanoCPUs = int64(limits.NanoCPUs * 1e9)
 	}
 	if limits.Pids > 0 {
 		resources.PidsLimit = &limits.Pids
@@ -1088,7 +1151,8 @@ func buildVolumeOptions(vol *types.ServiceVolumeVolume) *mount.VolumeOptions {
 		return nil
 	}
 	return &mount.VolumeOptions{
-		NoCopy: vol.NoCopy,
+		NoCopy:  vol.NoCopy,
+		Subpath: vol.Subpath,
 		// Labels:       , // FIXME missing from model ?
 		// DriverConfig: , // FIXME missing from model ?
 	}

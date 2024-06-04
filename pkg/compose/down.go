@@ -22,17 +22,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/compose/v2/pkg/utils"
-
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/docker/compose/v2/internal/desktop"
+	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v2/pkg/progress"
+	"github.com/docker/compose/v2/pkg/utils"
 	moby "github.com/docker/docker/api/types"
 	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	imageapi "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/errdefs"
 	"golang.org/x/sync/errgroup"
-
-	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/compose/v2/pkg/progress"
 )
 
 type downOp func() error
@@ -144,6 +144,14 @@ func (s *composeService) ensureVolumesDown(ctx context.Context, project *types.P
 			return s.removeVolume(ctx, volumeName, w)
 		})
 	}
+
+	if s.manageDesktopFileSharesEnabled(ctx) {
+		ops = append(ops, func() error {
+			desktop.RemoveFileSharesForProject(ctx, s.desktopCli, project.Name)
+			return nil
+		})
+	}
+
 	return ops
 }
 
@@ -244,7 +252,7 @@ func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName s
 func (s *composeService) removeImage(ctx context.Context, image string, w progress.Writer) error {
 	id := fmt.Sprintf("Image %s", image)
 	w.Event(progress.NewEvent(id, progress.Working, "Removing"))
-	_, err := s.apiClient().ImageRemove(ctx, image, moby.ImageRemoveOptions{})
+	_, err := s.apiClient().ImageRemove(ctx, image, imageapi.RemoveOptions{})
 	if err == nil {
 		w.Event(progress.NewEvent(id, progress.Done, "Removed"))
 		return nil
@@ -336,8 +344,20 @@ func (s *composeService) stopAndRemoveContainer(ctx context.Context, container m
 
 func (s *composeService) getProjectWithResources(ctx context.Context, containers Containers, projectName string) (*types.Project, error) {
 	containers = containers.filter(isNotOneOff)
-	project, err := s.projectFromName(containers, projectName)
+	p, err := s.projectFromName(containers, projectName)
 	if err != nil && !api.IsNotFoundError(err) {
+		return nil, err
+	}
+	project, err := p.WithServicesTransform(func(name string, service types.ServiceConfig) (types.ServiceConfig, error) {
+		for k := range service.DependsOn {
+			if dependency, ok := service.DependsOn[k]; ok {
+				dependency.Required = false
+				service.DependsOn[k] = dependency
+			}
+		}
+		return service, nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -352,5 +372,6 @@ func (s *composeService) getProjectWithResources(ctx context.Context, containers
 		return nil, err
 	}
 	project.Networks = networks
+
 	return project, nil
 }

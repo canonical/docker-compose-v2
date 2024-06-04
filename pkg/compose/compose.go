@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,12 +26,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/docker/compose/v2/internal/desktop"
+	"github.com/docker/compose/v2/internal/experimental"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/jonboulle/clockwork"
 
-	"github.com/docker/docker/api/types/volume"
-
 	"github.com/compose-spec/compose-go/v2/types"
-	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/cli/flags"
@@ -40,7 +41,6 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
-	"github.com/opencontainers/go-digest"
 )
 
 var stdioToStdout bool
@@ -63,10 +63,28 @@ func NewComposeService(dockerCli command.Cli) api.Service {
 }
 
 type composeService struct {
-	dockerCli      command.Cli
+	dockerCli   command.Cli
+	desktopCli  *desktop.Client
+	experiments *experimental.State
+
 	clock          clockwork.Clock
 	maxConcurrency int
 	dryRun         bool
+}
+
+// Close releases any connections/resources held by the underlying clients.
+//
+// In practice, this service has the same lifetime as the process, so everything
+// will get cleaned up at about the same time regardless even if not invoked.
+func (s *composeService) Close() error {
+	var errs []error
+	if s.dockerCli != nil {
+		errs = append(errs, s.dockerCli.Client().Close())
+	}
+	if s.isDesktopIntegrationActive() {
+		errs = append(errs, s.desktopCli.Close())
+	}
+	return errors.Join(errs...)
 }
 
 func (s *composeService) apiClient() client.APIClient {
@@ -145,35 +163,6 @@ func getContainerNameWithoutProject(c moby.Container) string {
 		return name
 	}
 	return name[len(project)+1:]
-}
-
-func (s *composeService) Config(ctx context.Context, project *types.Project, options api.ConfigOptions) ([]byte, error) {
-	if options.ResolveImageDigests {
-		var err error
-		project, err = project.WithImagesResolved(func(named reference.Named) (digest.Digest, error) {
-			auth, err := encodedAuth(named, s.configFile())
-			if err != nil {
-				return "", err
-			}
-			inspect, err := s.apiClient().DistributionInspect(ctx, named.String(), auth)
-			if err != nil {
-				return "", err
-			}
-			return inspect.Descriptor.Digest, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	switch options.Format {
-	case "json":
-		return project.MarshalJSON()
-	case "yaml":
-		return project.MarshalYAML()
-	default:
-		return nil, fmt.Errorf("unsupported format %q", options.Format)
-	}
 }
 
 // projectFromName builds a types.Project based on actual resources with compose labels set
@@ -330,4 +319,15 @@ func (s *composeService) RuntimeVersion(ctx context.Context) (string, error) {
 	})
 	return runtimeVersion.val, runtimeVersion.err
 
+}
+
+func (s *composeService) isDesktopIntegrationActive() bool {
+	return s.desktopCli != nil
+}
+
+func (s *composeService) isDesktopUIEnabled() bool {
+	if !s.isDesktopIntegrationActive() {
+		return false
+	}
+	return s.experiments.ComposeUI()
 }

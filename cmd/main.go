@@ -25,6 +25,7 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/cmd/cmdtrace"
 	"github.com/docker/docker/client"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
 	"github.com/docker/compose/v2/cmd/compatibility"
@@ -35,9 +36,12 @@ import (
 
 func pluginMain() {
 	plugin.Run(func(dockerCli command.Cli) *cobra.Command {
-		backend := compose.NewComposeService(dockerCli)
+		// TODO(milas): this cast is safe but we should not need to do this,
+		// 	we should expose the concrete service type so that we do not need
+		// 	to rely on the `api.Service` interface internally
+		backend := compose.NewComposeService(dockerCli).(commands.Backend)
 		cmd := commands.RootCommand(dockerCli, backend)
-		originalPreRun := cmd.PersistentPreRunE
+		originalPreRunE := cmd.PersistentPreRunE
 		cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 			// initialize the dockerCli instance
 			if err := plugin.PersistentPreRunE(cmd, args); err != nil {
@@ -46,12 +50,12 @@ func pluginMain() {
 			// compose-specific initialization
 			dockerCliPostInitialize(dockerCli)
 
-			// TODO(milas): add an env var to enable logging from the
-			// OTel components for debugging purposes
-			_ = cmdtrace.Setup(cmd, dockerCli, os.Args[1:])
+			if err := cmdtrace.Setup(cmd, dockerCli, os.Args[1:]); err != nil {
+				logrus.Debugf("failed to enable tracing: %v", err)
+			}
 
-			if originalPreRun != nil {
-				return originalPreRun(cmd, args)
+			if originalPreRunE != nil {
+				return originalPreRunE(cmd, args)
 			}
 			return nil
 		}
