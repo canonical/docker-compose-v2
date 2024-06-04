@@ -9,7 +9,6 @@ import (
 	"github.com/docker/buildx/driver"
 	"github.com/docker/buildx/util/progress"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/util/tracing/detect"
 	"github.com/pkg/errors"
 )
 
@@ -57,22 +56,18 @@ func (d *Driver) Rm(ctx context.Context, force, rmVolume, rmDaemon bool) error {
 	return nil
 }
 
-func (d *Driver) Client(ctx context.Context) (*client.Client, error) {
-	opts := []client.ClientOpt{
+func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
+	return d.DockerAPI.DialHijack(ctx, "/grpc", "h2c", d.DialMeta)
+}
+
+func (d *Driver) Client(ctx context.Context, opts ...client.ClientOpt) (*client.Client, error) {
+	opts = append([]client.ClientOpt{
 		client.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return d.DockerAPI.DialHijack(ctx, "/grpc", "h2c", d.DialMeta)
+			return d.Dial(ctx)
 		}), client.WithSessionDialer(func(ctx context.Context, proto string, meta map[string][]string) (net.Conn, error) {
 			return d.DockerAPI.DialHijack(ctx, "/session", proto, meta)
 		}),
-	}
-
-	exp, _, err := detect.Exporter()
-	if err != nil {
-		return nil, err
-	}
-	if td, ok := exp.(client.TracerDelegate); ok {
-		opts = append(opts, client.WithTracerDelegate(td))
-	}
+	}, opts...)
 	return client.New(ctx, "", opts...)
 }
 
@@ -98,6 +93,7 @@ func (d *Driver) Features(ctx context.Context) map[driver.Feature]bool {
 			driver.DockerExporter: useContainerdSnapshotter,
 			driver.CacheExport:    useContainerdSnapshotter,
 			driver.MultiPlatform:  useContainerdSnapshotter,
+			driver.DefaultLoad:    true,
 		}
 	})
 	return d.features.list

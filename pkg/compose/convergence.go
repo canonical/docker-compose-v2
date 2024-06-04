@@ -127,6 +127,24 @@ func (c *convergence) ensureService(ctx context.Context, project *types.Project,
 	}
 
 	sort.Slice(containers, func(i, j int) bool {
+		// select obsolete containers first, so they get removed as we scale down
+		if obsolete, _ := mustRecreate(service, containers[i], recreate); obsolete {
+			// i is obsolete, so must be first in the list
+			return true
+		}
+		if obsolete, _ := mustRecreate(service, containers[j], recreate); obsolete {
+			// j is obsolete, so must be first in the list
+			return false
+		}
+
+		// For up-to-date containers, sort by container number to preserve low-values in container numbers
+		ni, erri := strconv.Atoi(containers[i].Labels[api.ContainerNumberLabel])
+		nj, errj := strconv.Atoi(containers[j].Labels[api.ContainerNumberLabel])
+		if erri == nil && errj == nil {
+			return ni < nj
+		}
+
+		// If we don't get a container number (?) just sort by creation date
 		return containers[i].Created < containers[j].Created
 	})
 	for i, container := range containers {
@@ -739,7 +757,7 @@ func (s *composeService) isServiceCompleted(ctx context.Context, containers Cont
 	return false, 0, nil
 }
 
-func (s *composeService) startService(ctx context.Context, project *types.Project, service types.ServiceConfig, containers Containers, wait bool) error {
+func (s *composeService) startService(ctx context.Context, project *types.Project, service types.ServiceConfig, containers Containers) error {
 	if service.Deploy != nil && service.Deploy.Replicas != nil && *service.Deploy.Replicas == 0 {
 		return nil
 	}
@@ -767,26 +785,9 @@ func (s *composeService) startService(ctx context.Context, project *types.Projec
 		if err != nil {
 			return err
 		}
-		status := progress.Done
-		if wait || dependencyWaiting(project, service.Name) {
-			status = progress.Working
-		}
-		w.Event(progress.NewEvent(eventName, status, "Started"))
+		w.Event(progress.StartedEvent(eventName))
 	}
 	return nil
-}
-
-func dependencyWaiting(project *types.Project, name string) bool {
-	for _, service := range project.Services {
-		depends, ok := service.DependsOn[name]
-		if !ok {
-			continue
-		}
-		if depends.Condition == types.ServiceConditionHealthy {
-			return true
-		}
-	}
-	return false
 }
 
 func mergeLabels(ls ...types.Labels) types.Labels {

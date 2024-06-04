@@ -9,6 +9,7 @@ import (
 
 	dockerclient "github.com/docker/docker/client"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/util/tracing/detect"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"k8s.io/client-go/rest"
@@ -52,7 +53,7 @@ type InitConfig struct {
 	EndpointAddr     string
 	DockerAPI        dockerclient.APIClient
 	KubeClientConfig KubeClientConfig
-	BuildkitFlags    []string
+	BuildkitdFlags   []string
 	Files            map[string][]byte
 	DriverOpts       map[string]string
 	Auth             Auth
@@ -103,13 +104,13 @@ func GetFactory(name string, instanceRequired bool) (Factory, error) {
 	return nil, errors.Errorf("failed to find driver %q", name)
 }
 
-func GetDriver(ctx context.Context, name string, f Factory, endpointAddr string, api dockerclient.APIClient, auth Auth, kcc KubeClientConfig, flags []string, files map[string][]byte, do map[string]string, platforms []specs.Platform, contextPathHash string, dialMeta map[string][]string) (*DriverHandle, error) {
+func GetDriver(ctx context.Context, name string, f Factory, endpointAddr string, api dockerclient.APIClient, auth Auth, kcc KubeClientConfig, buildkitdFlags []string, files map[string][]byte, do map[string]string, platforms []specs.Platform, contextPathHash string, dialMeta map[string][]string) (*DriverHandle, error) {
 	ic := InitConfig{
 		EndpointAddr:     endpointAddr,
 		DockerAPI:        api,
 		KubeClientConfig: kcc,
 		Name:             name,
-		BuildkitFlags:    flags,
+		BuildkitdFlags:   buildkitdFlags,
 		DriverOpts:       do,
 		Auth:             auth,
 		Platforms:        platforms,
@@ -156,9 +157,26 @@ type DriverHandle struct {
 
 func (d *DriverHandle) Client(ctx context.Context) (*client.Client, error) {
 	d.once.Do(func() {
-		d.client, d.err = d.Driver.Client(ctx)
+		opts, err := d.getClientOptions()
+		if err != nil {
+			d.err = err
+			return
+		}
+		d.client, d.err = d.Driver.Client(ctx, opts...)
 	})
 	return d.client, d.err
+}
+
+func (d *DriverHandle) getClientOptions() ([]client.ClientOpt, error) {
+	exp, _, err := detect.Exporter()
+	if err != nil {
+		return nil, err
+	} else if td, ok := exp.(client.TracerDelegate); ok {
+		return []client.ClientOpt{
+			client.WithTracerDelegate(td),
+		}, nil
+	}
+	return nil, nil
 }
 
 func (d *DriverHandle) HistoryAPISupported(ctx context.Context) bool {
