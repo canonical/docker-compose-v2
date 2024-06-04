@@ -1,8 +1,9 @@
 docker-compose-v2 (2.27.1+ds1-0ubuntu1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * Refresh patch.
 
- -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 04 Jun 2024 18:25:55 -0300
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 04 Jun 2024 18:27:26 -0300
 
 docker-compose-v2 (2.24.6+ds1-0ubuntu2) noble; urgency=medium
 
