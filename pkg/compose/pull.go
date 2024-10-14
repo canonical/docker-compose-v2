@@ -28,10 +28,13 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/distribution/reference"
 	"github.com/docker/buildx/driver"
-	moby "github.com/docker/docker/api/types"
+	"github.com/docker/cli/cli/config/configfile"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/registry"
 	"github.com/hashicorp/go-multierror"
+	"github.com/opencontainers/go-digest"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/docker/compose/v2/pkg/api"
@@ -166,6 +169,14 @@ func imageAlreadyPresent(serviceImage string, localImages map[string]string) boo
 	return ok && tagged.Tag() != "latest"
 }
 
+func getUnwrappedErrorMessage(err error) string {
+	derr := errors.Unwrap(err)
+	if derr != nil {
+		return getUnwrappedErrorMessage(derr)
+	}
+	return err.Error()
+}
+
 func (s *composeService) pullServiceImage(ctx context.Context, service types.ServiceConfig,
 	configFile driver.Auth, w progress.Writer, quietPull bool, defaultPlatform string) (string, error) {
 	w.Event(progress.Event{
@@ -188,7 +199,7 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 		platform = defaultPlatform
 	}
 
-	stream, err := s.apiClient().ImagePull(ctx, service.Image, moby.ImagePullOptions{
+	stream, err := s.apiClient().ImagePull(ctx, service.Image, image.PullOptions{
 		RegistryAuth: encodedAuth,
 		Platform:     platform,
 	})
@@ -197,18 +208,20 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 	// then the status should be warning instead of error
 	if err != nil && service.Build != nil {
 		w.Event(progress.Event{
-			ID:     service.Name,
-			Status: progress.Warning,
-			Text:   "Warning",
+			ID:         service.Name,
+			Status:     progress.Warning,
+			Text:       "Warning",
+			StatusText: getUnwrappedErrorMessage(err),
 		})
 		return "", WrapCategorisedComposeError(err, PullFailure)
 	}
 
 	if err != nil {
 		w.Event(progress.Event{
-			ID:     service.Name,
-			Status: progress.Error,
-			Text:   "Error",
+			ID:         service.Name,
+			Status:     progress.Error,
+			Text:       "Error",
+			StatusText: getUnwrappedErrorMessage(err),
 		})
 		return "", WrapCategorisedComposeError(err, PullFailure)
 	}
@@ -240,6 +253,22 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 		return "", err
 	}
 	return inspected.ID, nil
+}
+
+// ImageDigestResolver creates a func able to resolve image digest from a docker ref,
+func ImageDigestResolver(ctx context.Context, file *configfile.ConfigFile, apiClient client.APIClient) func(named reference.Named) (digest.Digest, error) {
+	return func(named reference.Named) (digest.Digest, error) {
+		auth, err := encodedAuth(named, file)
+		if err != nil {
+			return "", err
+		}
+		inspect, err := apiClient.DistributionInspect(ctx, named.String(), auth)
+		if err != nil {
+			return "",
+				fmt.Errorf("failed ot resolve digest for %s: %w", named.String(), err)
+		}
+		return inspect.Descriptor.Digest, nil
+	}
 }
 
 func encodedAuth(ref reference.Named, configFile driver.Auth) (string, error) {

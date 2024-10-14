@@ -282,6 +282,56 @@ func TestBuildGraph(t *testing.T) {
 	}
 }
 
+func TestBuildGraphDependsOn(t *testing.T) {
+	testCases := []struct {
+		desc             string
+		services         types.Services
+		expectedVertices map[string]*Vertex
+	}{
+		{
+			desc: "service depends on init container which is already removed",
+			services: types.Services{
+				"test": {
+					Name: "test",
+					DependsOn: types.DependsOnConfig{
+						"test-removed-init-container": types.ServiceDependency{
+							Condition:  "service_completed_successfully",
+							Restart:    false,
+							Extensions: types.Extensions(nil),
+							Required:   false,
+						},
+					},
+				},
+			},
+			expectedVertices: map[string]*Vertex{
+				"test": {
+					Key:      "test",
+					Service:  "test",
+					Status:   ServiceStopped,
+					Children: map[string]*Vertex{},
+					Parents:  map[string]*Vertex{},
+				},
+			},
+		},
+	}
+	for _, tC := range testCases {
+		t.Run(tC.desc, func(t *testing.T) {
+			project := types.Project{
+				Services: tC.services,
+			}
+
+			graph, err := NewGraph(&project, ServiceStopped)
+			assert.NilError(t, err, fmt.Sprintf("failed to build graph for: %s", tC.desc))
+
+			for k, vertex := range graph.Vertices {
+				expected, ok := tC.expectedVertices[k]
+				assert.Equal(t, true, ok)
+				assert.Equal(t, true, isVertexEqual(*expected, *vertex))
+			}
+		})
+	}
+}
+
 func isVertexEqual(a, b Vertex) bool {
 	childrenEquality := true
 	for c := range a.Children {

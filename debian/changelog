@@ -1,8 +1,17 @@
-docker-compose-v2 (2.24.6+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
+docker-compose-v2 (2.27.1+ds1-0ubuntu1) oracular; urgency=medium
 
-  * Backport version from Noble to Jammy (LP: #2040460).
+  * New upstream release.
+  * Refresh patch.
 
- -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 12 Mar 2024 18:08:11 -0300
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Tue, 04 Jun 2024 18:27:26 -0300
+
+docker-compose-v2 (2.24.6+ds1-0ubuntu2) noble; urgency=medium
+
+  * Build with Go 1.22.
+    - d/control: b-d on golang-1.22-go instead of golang-1.21-go
+    - d/rules: add Go 1.22 to $PATH
+
+ -- Lucas Kanashiro <kanashiro@ubuntu.com>  Wed, 17 Apr 2024 17:13:40 -0300
 
 docker-compose-v2 (2.24.6+ds1-0ubuntu1) noble; urgency=medium
 
@@ -16,15 +25,6 @@ docker-compose-v2 (2.24.6+ds1-0ubuntu1) noble; urgency=medium
   * d/copyright: remove superfluous file patterns.
 
  -- Lucas Kanashiro <kanashiro@ubuntu.com>  Mon, 19 Feb 2024 17:56:31 -0300
-
-docker-compose-v2 (2.20.2+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
-
-  * Backport version from Mantic to Jammy (LP: #1968035, #2036350).
-    - Build with Go 1.20.
-      + d/control: b-d on golang-1.20-go.
-      + d/rules: add Go 1.20 to $PATH.
-
- -- Lucas Kanashiro <kanashiro@ubuntu.com>  Sun, 17 Sep 2023 09:26:22 -0300
 
 docker-compose-v2 (2.20.2+ds1-0ubuntu1) mantic; urgency=medium
 
