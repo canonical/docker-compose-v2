@@ -15,7 +15,6 @@ import (
 	"github.com/docker/buildx/util/platformutil"
 	"github.com/docker/buildx/util/progress"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/util/tracing/detect"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +49,7 @@ type Driver struct {
 	podClient        clientcorev1.PodInterface
 	configMapClient  clientcorev1.ConfigMapInterface
 	podChooser       podchooser.PodChooser
+	defaultLoad      bool
 }
 
 func (d *Driver) IsMobyDriver() bool {
@@ -189,7 +189,7 @@ func (d *Driver) Rm(ctx context.Context, force, rmVolume, rmDaemon bool) error {
 	return nil
 }
 
-func (d *Driver) Client(ctx context.Context) (*client.Client, error) {
+func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
 	restClient := d.clientset.CoreV1().RESTClient()
 	restClientConfig, err := d.KubeClientConfig.ClientConfig()
 	if err != nil {
@@ -208,19 +208,15 @@ func (d *Driver) Client(ctx context.Context) (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	return conn, nil
+}
 
-	exp, _, err := detect.Exporter()
-	if err != nil {
-		return nil, err
-	}
-
-	var opts []client.ClientOpt
-	opts = append(opts, client.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-		return conn, nil
-	}))
-	if td, ok := exp.(client.TracerDelegate); ok {
-		opts = append(opts, client.WithTracerDelegate(td))
-	}
+func (d *Driver) Client(ctx context.Context, opts ...client.ClientOpt) (*client.Client, error) {
+	opts = append([]client.ClientOpt{
+		client.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return d.Dial(ctx)
+		}),
+	}, opts...)
 	return client.New(ctx, "", opts...)
 }
 
@@ -234,6 +230,7 @@ func (d *Driver) Features(_ context.Context) map[driver.Feature]bool {
 		driver.DockerExporter: d.DockerAPI != nil,
 		driver.CacheExport:    true,
 		driver.MultiPlatform:  true, // Untested (needs multiple Driver instances)
+		driver.DefaultLoad:    d.defaultLoad,
 	}
 }
 

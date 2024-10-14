@@ -12,15 +12,17 @@ import (
 	"github.com/docker/cli/cli-plugins/socket"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/connhelper"
+	"github.com/docker/cli/cli/debug"
 	"github.com/docker/docker/client"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
 )
 
 // PersistentPreRunE must be called by any plugin command (or
 // subcommand) which uses the cobra `PersistentPreRun*` hook. Plugins
 // which do not make use of `PersistentPreRun*` do not need to call
 // this (although it remains safe to do so). Plugins are recommended
-// to use `PersistenPreRunE` to enable the error to be
+// to use `PersistentPreRunE` to enable the error to be
 // returned. Should not be called outside of a command's
 // PersistentPreRunE hook and must not be run unless Run has been
 // called.
@@ -50,6 +52,24 @@ func RunPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager
 				opts = append(opts, withPluginClientConn(plugin.Name()))
 			}
 			err = tcmd.Initialize(opts...)
+			ogRunE := cmd.RunE
+			if ogRunE == nil {
+				ogRun := cmd.Run
+				// necessary because error will always be nil here
+				// see: https://github.com/golangci/golangci-lint/issues/1379
+				//nolint:unparam
+				ogRunE = func(cmd *cobra.Command, args []string) error {
+					ogRun(cmd, args)
+					return nil
+				}
+				cmd.Run = nil
+			}
+			cmd.RunE = func(cmd *cobra.Command, args []string) error {
+				stopInstrumentation := dockerCli.StartInstrumentation(cmd)
+				err := ogRunE(cmd, args)
+				stopInstrumentation(err)
+				return err
+			}
 		})
 		return err
 	}
@@ -66,6 +86,8 @@ func RunPlugin(dockerCli *command.DockerCli, plugin *cobra.Command, meta manager
 
 // Run is the top-level entry point to the CLI plugin framework. It should be called from your plugin's `main()` function.
 func Run(makeCmd func(command.Cli) *cobra.Command, meta manager.Metadata) {
+	otel.SetErrorHandler(debug.OTELErrorHandler)
+
 	dockerCli, err := command.NewDockerCli()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buger/goterm"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/docker/pkg/jsonmessage"
 )
@@ -62,7 +63,11 @@ func (l *logConsumer) Register(name string) {
 func (l *logConsumer) register(name string) *presenter {
 	cf := monochrome
 	if l.color {
-		cf = nextColor()
+		if name == api.WatchLogger {
+			cf = makeColorFunc("92")
+		} else {
+			cf = nextColor()
+		}
 	}
 	p := &presenter{
 		colors: cf,
@@ -102,6 +107,10 @@ func (l *logConsumer) write(w io.Writer, container, message string) {
 	if l.ctx.Err() != nil {
 		return
 	}
+	if KeyboardManager != nil {
+		KeyboardManager.ClearKeyboardInfo()
+	}
+
 	p := l.getPresenter(container)
 	timestamp := time.Now().Format(jsonmessage.RFC3339NanoFixed)
 	for _, line := range strings.Split(message, "\n") {
@@ -111,11 +120,15 @@ func (l *logConsumer) write(w io.Writer, container, message string) {
 			fmt.Fprintf(w, "%s%s\n", p.prefix, line)
 		}
 	}
+
+	if KeyboardManager != nil {
+		KeyboardManager.PrintKeyboardInfo()
+	}
 }
 
 func (l *logConsumer) Status(container, msg string) {
 	p := l.getPresenter(container)
-	s := p.colors(fmt.Sprintf("%s %s\n", container, msg))
+	s := p.colors(fmt.Sprintf("%s%s %s\n", goterm.RESET_LINE, container, msg))
 	l.stdout.Write([]byte(s)) //nolint:errcheck
 }
 
@@ -138,5 +151,9 @@ type presenter struct {
 }
 
 func (p *presenter) setPrefix(width int) {
+	if p.name == api.WatchLogger {
+		p.prefix = p.colors(strings.Repeat(" ", width) + " ⦿ ")
+		return
+	}
 	p.prefix = p.colors(fmt.Sprintf("%-"+strconv.Itoa(width)+"s | ", p.name))
 }

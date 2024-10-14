@@ -18,10 +18,7 @@ package locker
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-
-	"github.com/docker/docker/pkg/pidfile"
 )
 
 type Pidfile struct {
@@ -35,8 +32,4 @@ func NewPidfile(projectName string) (*Pidfile, error) {
 	}
 	path := filepath.Join(run, fmt.Sprintf("%s.pid", projectName))
 	return &Pidfile{path: path}, nil
-}
-
-func (f *Pidfile) Lock() error {
-	return pidfile.Write(f.path, os.Getpid())
 }

@@ -35,6 +35,17 @@ options:
       experimentalcli: false
       kubernetes: false
       swarm: false
+    - option: abort-on-container-failure
+      value_type: bool
+      default_value: "false"
+      description: |
+        Stops all containers if any container exited with failure. Incompatible with -d
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
     - option: always-recreate-deps
       value_type: bool
       default_value: "false"
@@ -102,6 +113,17 @@ options:
       default_value: "false"
       description: |
         Recreate containers even if their configuration and image haven't changed
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: menu
+      value_type: bool
+      default_value: "false"
+      description: |
+        Enable interactive shortcuts when running attached. Incompatible with --detach. Can also be enable/disable by setting COMPOSE_MENU environment var.
       deprecated: false
       hidden: false
       experimental: false
@@ -268,6 +290,18 @@ options:
       value_type: int
       default_value: "0"
       description: Maximum duration to wait for the project to be running|healthy
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: watch
+      shorthand: w
+      value_type: bool
+      default_value: "false"
+      description: |
+        Watch source code and rebuild/refresh containers when files are updated.
       deprecated: false
       hidden: false
       experimental: false

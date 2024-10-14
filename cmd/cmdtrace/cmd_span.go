@@ -30,6 +30,7 @@ import (
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -50,7 +51,7 @@ func Setup(cmd *cobra.Command, dockerCli command.Cli, args []string) error {
 	}
 
 	ctx := cmd.Context()
-	ctx, cmdSpan := tracing.Tracer.Start(
+	ctx, cmdSpan := otel.Tracer("").Start(
 		ctx,
 		"cli/"+strings.Join(commandName(cmd), "-"),
 	)
@@ -104,7 +105,7 @@ func wrapRunE(c *cobra.Command, cmdSpan trace.Span, tracingShutdown tracing.Shut
 		if tracingShutdown != nil {
 			// use background for root context because the cmd's context might have
 			// been canceled already
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			// TODO(milas): add an env var to enable logging from the
 			// OTel components for debugging purposes

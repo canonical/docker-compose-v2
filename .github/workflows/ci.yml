@@ -18,9 +18,6 @@ on:
         required: false
         default: "false"
 
-env:
-  DOCKER_CLI_VERSION: "25.0.1"
-
 permissions:
   contents: read # to fetch code (actions/checkout)
 
@@ -129,7 +126,12 @@ jobs:
           name: coverage-data-unit
           path: bin/coverage/unit/
           if-no-files-found: error
-
+      - 
+        name: Unit Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: bin/coverage/unit/report.xml       
+        if: always()
   e2e:
     runs-on: ubuntu-latest
     strategy:
@@ -140,7 +142,8 @@ jobs:
           - standalone
         engine:
           - 24.0.9
-          - 25.0.2
+          - 25.0.4
+          - 26.0.0
     steps:
       -
         name: Checkout
@@ -162,11 +165,6 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
           cache: true
-      -
-        name: Setup docker CLI
-        run: |
-          curl https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz | tar xz
-          sudo cp ./docker/docker /usr/bin/ && rm -rf docker && docker version
       -
         name: Build
         uses: docker/bake-action@v2
@@ -207,7 +205,12 @@ jobs:
           rm -f /usr/local/bin/docker-compose
           cp bin/build/docker-compose /usr/local/bin
           make e2e-compose-standalone
-
+      - 
+        name: e2e Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: /tmp/report/report.xml       
+        if: always()
   coverage:
     runs-on: ubuntu-22.04
     needs:

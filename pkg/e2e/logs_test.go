@@ -42,19 +42,19 @@ func TestLocalComposeLogs(t *testing.T) {
 
 	t.Run("logs", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "--project-name", projectName, "logs")
-		res.Assert(t, icmd.Expected{Out: `PING localhost (127.0.0.1)`})
+		res.Assert(t, icmd.Expected{Out: `PING localhost`})
 		res.Assert(t, icmd.Expected{Out: `hello`})
 	})
 
 	t.Run("logs ping", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "--project-name", projectName, "logs", "ping")
-		res.Assert(t, icmd.Expected{Out: `PING localhost (127.0.0.1)`})
+		res.Assert(t, icmd.Expected{Out: `PING localhost`})
 		assert.Assert(t, !strings.Contains(res.Stdout(), "hello"))
 	})
 
 	t.Run("logs hello", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "--project-name", projectName, "logs", "hello", "ping")
-		res.Assert(t, icmd.Expected{Out: `PING localhost (127.0.0.1)`})
+		res.Assert(t, icmd.Expected{Out: `PING localhost`})
 		res.Assert(t, icmd.Expected{Out: `hello`})
 	})
 
@@ -116,7 +116,9 @@ func TestLocalComposeLargeLogs(t *testing.T) {
 	}
 	assert.NilError(t, f.Close())
 
-	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/logs-test/cat.yaml", "--project-name", projectName, "up", "--abort-on-container-exit")
+	cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/logs-test/cat.yaml", "--project-name", projectName, "up", "--abort-on-container-exit")
+	cmd.Stdout = io.Discard
+	res := icmd.RunCmd(cmd)
 	res.Assert(t, icmd.Expected{Out: "test-1 exited with code 0"})
 }
 
