@@ -1,3 +1,9 @@
+docker-compose-v2 (2.27.1+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
+
+  * Backport from oracular to jammy. (LP: #2040461)
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Mon, 14 Oct 2024 11:21:04 -0300
+
 docker-compose-v2 (2.27.1+ds1-0ubuntu1) oracular; urgency=medium
 
   * New upstream release.
