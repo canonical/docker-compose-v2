@@ -44,7 +44,6 @@ Copyright: 2015 go-swagger maintainers
 License: Apache-2.0
 
 Files: vendor/k8s.io/kube-openapi/pkg/validation/spec/gnostic.go
-       vendor/k8s.io/kube-openapi/pkg/validation/spec/fuzz.go
 Copyright: 2022 The Kubernetes Authors
 License: Apache-2.0
 
@@ -84,18 +83,6 @@ License: BSD-3-clause-Google
 Files: vendor/google.golang.org/protobuf/types/*/*.pb.go
 Copyright: 2008 Google Inc
 License: BSD-3-clause-Google
-
-Files: vendor/google.golang.org/appengine/*
-Copyright: 2011-2015 Google Inc
-License: Apache-2.0
-
-Files: vendor/google.golang.org/appengine/internal/identity_flex.go
-Copyright: 2018 Google LLC
-License: Apache-2.0
-
-Files: vendor/google.golang.org/genproto/protobuf/field_mask/field_mask.go
-Copyright: 2020 Google LLC
-License: Apache-2.0
 
 Files: vendor/google.golang.org/genproto/googleapis/*/*/*.pb.go
 Copyright: 2015-2023 Google LLC
@@ -236,20 +223,14 @@ Copyright: 2010-2017 The Go Authors
            2013 The GoGo Authors
 License: BSD-3-clause-Google
 
-Files: vendor/github.com/gogo/protobuf/gogoproto/*
-       vendor/github.com/gogo/protobuf/*/*_gogo.go
+Files: vendor/github.com/gogo/protobuf/*/*_gogo.go
        vendor/github.com/gogo/protobuf/proto/wrappers.go
        vendor/github.com/gogo/protobuf/sortkeys/sortkeys.go
 Copyright: 2013-2018 The GoGo Authors
 License: BSD-2-clause 
 
-Files: vendor/github.com/gogo/googleapis/*
-Copyright: 2015 Google Inc
-           2018 GoGo Authors
-License: Apache-2.0
-
-Files: vendor/github.com/gogo/googleapis/google/rpc/*.proto
-Copyright: 2020 Google LLC
+Files: vendor/google.golang.org/genproto/googleapis/*
+Copyright: 2024 Google LLC
 License: Apache-2.0
 
 Files: vendor/github.com/pkg/errors/*
@@ -259,10 +240,6 @@ License: BSD-2-clause
 Files: vendor/github.com/fvbommel/sortorder/*
 Copyright: 2015 Frits van Bommel
 License: Expat
-
-Files: vendor/github.com/matttproud/golang_protobuf_extensions/*
-Copyright: 2012-2013 Matt T. Proud <matt.proud@gmail.com>
-License: Apache-2.0
 
 Files: vendor/github.com/munnerz/goautoneg/*
 Copyright: 2011 Open Knowledge Foundation Ltd
@@ -284,7 +261,7 @@ Files: vendor/github.com/google/go-cmp/*
 Copyright: 2017-2020 The Go Authors
 License: BSD-3-clause-Google
 
-Files: vendor/github.com/google/gnostic/*
+Files: vendor/github.com/google/gnostic-models/*
 Copyright: 2017-2020 Google LLC
 License: Apache-2.0
 
@@ -303,11 +280,6 @@ License: Expat
 
 Files: vendor/github.com/gofrs/flock/*
 Copyright: 2015-2020 Tim Heckman
-License: BSD-3-clause-Generic
-
-Files: vendor/github.com/gofrs/flock/flock_aix.go
-Copyright: 2019 Tim Heckman
-           2018 The Go Authors
 License: BSD-3-clause-Generic
 
 Files: vendor/github.com/morikuni/aec/*
@@ -370,10 +342,6 @@ License: OASIS-IPR-Policy
 Files: vendor/github.com/prometheus/*
 Copyright: 2013-2022 The Prometheus Authors
 License: Apache-2.0
-
-Files: vendor/github.com/prometheus/common/internal/bitbucket.org/ww/goautoneg/*
-Copyright: 2011 Open Knowledge Foundation Ltd
-License: BSD-3-clause-Generic
 
 Files: vendor/github.com/prometheus/client_golang/*
 Copyright: 2012-2022 The Prometheus Authors
@@ -503,10 +471,6 @@ License: Apache-2.0
 Files: vendor/github.com/Azure/go-ansiterm/*
 Copyright: 2015 Microsoft Corporation
 License: Expat
-
-Files: vendor/github.com/grpc-ecosystem/go-grpc-middleware/*
-Copyright: 2016 Michal Witkowski
-License: Apache-2.0
 
 Files: vendor/github.com/grpc-ecosystem/grpc-gateway/v2/*
 Copyright: 2015, Gengo, Inc
