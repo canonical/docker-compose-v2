@@ -42,9 +42,6 @@ import (
 )
 
 func (s *composeService) Pull(ctx context.Context, project *types.Project, options api.PullOptions) error {
-	if options.Quiet {
-		return s.pull(ctx, project, options)
-	}
 	return progress.RunWithTitle(ctx, func(ctx context.Context) error {
 		return s.pull(ctx, project, options)
 	}, s.stdinfo(), "Pulling")
@@ -116,9 +113,9 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 
 		imagesBeingPulled[service.Image] = service.Name
 
-		idx, name, service := i, name, service
+		idx := i
 		eg.Go(func() error {
-			_, err := s.pullServiceImage(ctx, service, s.configFile(), w, false, project.Environment["DOCKER_DEFAULT_PLATFORM"])
+			_, err := s.pullServiceImage(ctx, service, s.configFile(), w, opts.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
 			if err != nil {
 				pullErrors[idx] = err
 				if service.Build != nil {
@@ -178,7 +175,8 @@ func getUnwrappedErrorMessage(err error) string {
 }
 
 func (s *composeService) pullServiceImage(ctx context.Context, service types.ServiceConfig,
-	configFile driver.Auth, w progress.Writer, quietPull bool, defaultPlatform string) (string, error) {
+	configFile driver.Auth, w progress.Writer, quietPull bool, defaultPlatform string,
+) (string, error) {
 	w.Event(progress.Event{
 		ID:     service.Name,
 		Status: progress.Working,
@@ -213,7 +211,7 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 			Text:       "Warning",
 			StatusText: getUnwrappedErrorMessage(err),
 		})
-		return "", WrapCategorisedComposeError(err, PullFailure)
+		return "", err
 	}
 
 	if err != nil {
@@ -223,7 +221,7 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 			Text:       "Error",
 			StatusText: getUnwrappedErrorMessage(err),
 		})
-		return "", WrapCategorisedComposeError(err, PullFailure)
+		return "", err
 	}
 
 	dec := json.NewDecoder(stream)
@@ -233,10 +231,10 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return "", WrapCategorisedComposeError(err, PullFailure)
+			return "", err
 		}
 		if jm.Error != nil {
-			return "", WrapCategorisedComposeError(errors.New(jm.Error.Message), PullFailure)
+			return "", errors.New(jm.Error.Message)
 		}
 		if !quietPull {
 			toPullProgressEvent(service.Name, jm, w)
@@ -265,7 +263,7 @@ func ImageDigestResolver(ctx context.Context, file *configfile.ConfigFile, apiCl
 		inspect, err := apiClient.DistributionInspect(ctx, named.String(), auth)
 		if err != nil {
 			return "",
-				fmt.Errorf("failed ot resolve digest for %s: %w", named.String(), err)
+				fmt.Errorf("failed to resolve digest for %s: %w", named.String(), err)
 		}
 		return inspect.Descriptor.Digest, nil
 	}
@@ -318,7 +316,6 @@ func (s *composeService) pullRequiredImages(ctx context.Context, project *types.
 		eg.SetLimit(s.maxConcurrency)
 		pulledImages := make([]string, len(needPull))
 		for i, service := range needPull {
-			i, service := i, service
 			eg.Go(func() error {
 				id, err := s.pullServiceImage(ctx, service, s.configFile(), w, quietPull, project.Environment["DOCKER_DEFAULT_PLATFORM"])
 				pulledImages[i] = id

@@ -51,7 +51,7 @@ func TestUpExitCodeFrom(t *testing.T) {
 	c := NewParallelCLI(t)
 	const projectName = "e2e-exit-code-from"
 
-	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/start-fail/start-depends_on-long-lived.yaml", "--project-name", projectName, "up", "--exit-code-from=failure", "failure")
+	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/start-fail/start-depends_on-long-lived.yaml", "--project-name", projectName, "up", "--menu=false", "--exit-code-from=failure", "failure")
 	res.Assert(t, icmd.Expected{ExitCode: 42})
 
 	c.RunDockerComposeCmd(t, "--project-name", projectName, "down", "--remove-orphans")
@@ -61,7 +61,7 @@ func TestUpExitCodeFromContainerKilled(t *testing.T) {
 	c := NewParallelCLI(t)
 	const projectName = "e2e-exit-code-from-kill"
 
-	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/start-fail/start-depends_on-long-lived.yaml", "--project-name", projectName, "up", "--exit-code-from=test")
+	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/start-fail/start-depends_on-long-lived.yaml", "--project-name", projectName, "up", "--menu=false", "--exit-code-from=test")
 	res.Assert(t, icmd.Expected{ExitCode: 143})
 
 	c.RunDockerComposeCmd(t, "--project-name", projectName, "down", "--remove-orphans")
@@ -85,8 +85,29 @@ func TestStdoutStderr(t *testing.T) {
 	c := NewParallelCLI(t)
 	const projectName = "e2e-stdout-stderr"
 
-	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/stdout-stderr/compose.yaml", "--project-name", projectName, "up")
+	res := c.RunDockerComposeCmdNoCheck(t, "-f", "fixtures/stdout-stderr/compose.yaml", "--project-name", projectName, "up", "--menu=false")
 	res.Assert(t, icmd.Expected{Out: "log to stdout", Err: "log to stderr"})
 
 	c.RunDockerComposeCmd(t, "--project-name", projectName, "down", "--remove-orphans")
+}
+
+func TestLoggingDriver(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "e2e-logging-driver"
+	defer c.cleanupWithDown(t, projectName)
+
+	host := "HOST=127.0.0.1"
+	res := c.RunDockerCmd(t, "info", "-f", "{{.OperatingSystem}}")
+	os := res.Stdout()
+	if strings.TrimSpace(os) == "Docker Desktop" {
+		host = "HOST=host.docker.internal"
+	}
+
+	cmd := c.NewDockerComposeCmd(t, "-f", "fixtures/logging-driver/compose.yaml", "--project-name", projectName, "up", "-d")
+	cmd.Env = append(cmd.Env, host, "BAR=foo")
+	icmd.RunCmd(cmd).Assert(t, icmd.Success)
+
+	cmd = c.NewDockerComposeCmd(t, "-f", "fixtures/logging-driver/compose.yaml", "--project-name", projectName, "up", "-d")
+	cmd.Env = append(cmd.Env, host, "BAR=zot")
+	icmd.RunCmd(cmd).Assert(t, icmd.Success)
 }

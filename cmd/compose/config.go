@@ -54,6 +54,7 @@ type configOptions struct {
 	hash                string
 	noConsistency       bool
 	variables           bool
+	environment         bool
 }
 
 func (o *configOptions) ToProject(ctx context.Context, dockerCli command.Cli, services []string, po ...cli.ProjectOptionsFn) (*types.Project, error) {
@@ -118,6 +119,9 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 			if opts.variables {
 				return runVariables(ctx, dockerCli, opts, args)
 			}
+			if opts.environment {
+				return runEnvironment(ctx, dockerCli, opts, args)
+			}
 
 			return runConfig(ctx, dockerCli, opts, args)
 		}),
@@ -138,6 +142,7 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 	flags.BoolVar(&opts.images, "images", false, "Print the image names, one per line.")
 	flags.StringVar(&opts.hash, "hash", "", "Print the service config hash, one per line.")
 	flags.BoolVar(&opts.variables, "variables", false, "Print model variables and default values.")
+	flags.BoolVar(&opts.environment, "environment", false, "Print environment used for interpolation.")
 	flags.StringVarP(&opts.Output, "output", "o", "", "Save to file (default to stdout)")
 
 	return cmd
@@ -274,14 +279,31 @@ func formatModel(model map[string]any, format string) (content []byte, err error
 }
 
 func runServices(ctx context.Context, dockerCli command.Cli, opts configOptions) error {
+	if opts.noInterpolate {
+		// we can't use ToProject, so the model we render here is only partially resolved
+		data, err := opts.ToModel(ctx, dockerCli, nil, cli.WithoutEnvironmentResolution)
+		if err != nil {
+			return err
+		}
+
+		if _, ok := data["services"]; ok {
+			for serviceName := range data["services"].(map[string]any) {
+				_, _ = fmt.Fprintln(dockerCli.Out(), serviceName)
+			}
+		}
+
+		return nil
+	}
+
 	project, err := opts.ToProject(ctx, dockerCli, nil, cli.WithoutEnvironmentResolution)
 	if err != nil {
 		return err
 	}
 	err = project.ForEachService(project.ServiceNames(), func(serviceName string, _ *types.ServiceConfig) error {
-		fmt.Fprintln(dockerCli.Out(), serviceName)
+		_, _ = fmt.Fprintln(dockerCli.Out(), serviceName)
 		return nil
 	})
+
 	return err
 }
 
@@ -291,7 +313,7 @@ func runVolumes(ctx context.Context, dockerCli command.Cli, opts configOptions) 
 		return err
 	}
 	for n := range project.Volumes {
-		fmt.Fprintln(dockerCli.Out(), n)
+		_, _ = fmt.Fprintln(dockerCli.Out(), n)
 	}
 	return nil
 }
@@ -326,11 +348,10 @@ func runHash(ctx context.Context, dockerCli command.Cli, opts configOptions) err
 		}
 
 		hash, err := compose.ServiceHash(s)
-
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(dockerCli.Out(), "%s %s\n", name, hash)
+		_, _ = fmt.Fprintf(dockerCli.Out(), "%s %s\n", name, hash)
 	}
 	return nil
 }
@@ -352,7 +373,7 @@ func runProfiles(ctx context.Context, dockerCli command.Cli, opts configOptions,
 	}
 	sort.Strings(profiles)
 	for _, p := range profiles {
-		fmt.Fprintln(dockerCli.Out(), p)
+		_, _ = fmt.Fprintln(dockerCli.Out(), p)
 	}
 	return nil
 }
@@ -364,7 +385,7 @@ func runConfigImages(ctx context.Context, dockerCli command.Cli, opts configOpti
 	}
 
 	for _, s := range project.Services {
-		fmt.Fprintln(dockerCli.Out(), api.GetImageNameOrDefault(s, project.Name))
+		_, _ = fmt.Fprintln(dockerCli.Out(), api.GetImageNameOrDefault(s, project.Name))
 	}
 	return nil
 }
@@ -383,6 +404,18 @@ func runVariables(ctx context.Context, dockerCli command.Cli, opts configOptions
 			_, _ = fmt.Fprintf(w, "%s\t%t\t%s\t%s\n", name, variable.Required, variable.DefaultValue, variable.PresenceValue)
 		}
 	}, "NAME", "REQUIRED", "DEFAULT VALUE", "ALTERNATE VALUE")
+}
+
+func runEnvironment(ctx context.Context, dockerCli command.Cli, opts configOptions, services []string) error {
+	project, err := opts.ToProject(ctx, dockerCli, services)
+	if err != nil {
+		return err
+	}
+
+	for _, v := range project.Environment.Values() {
+		fmt.Println(v)
+	}
+	return nil
 }
 
 func escapeDollarSign(marshal []byte) []byte {

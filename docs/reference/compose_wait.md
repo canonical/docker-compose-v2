@@ -1,14 +1,14 @@
 # docker compose wait
 
 <!---MARKER_GEN_START-->
-Block until the first service container stops
+Block until containers of all (or specified) services stop.
 
 ### Options
 
-| Name             | Type | Default | Description                                  |
-|:-----------------|:-----|:--------|:---------------------------------------------|
-| `--down-project` |      |         | Drops project when the first container stops |
-| `--dry-run`      |      |         | Execute command in dry run mode              |
+| Name             | Type   | Default | Description                                  |
+|:-----------------|:-------|:--------|:---------------------------------------------|
+| `--down-project` | `bool` |         | Drops project when the first container stops |
+| `--dry-run`      | `bool` |         | Execute command in dry run mode              |
 
 
 <!---MARKER_GEN_END-->

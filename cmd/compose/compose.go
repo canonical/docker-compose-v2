@@ -18,8 +18,10 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,12 +38,12 @@ import (
 	dockercli "github.com/docker/cli/cli"
 	"github.com/docker/cli/cli-plugins/manager"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/pkg/kvfile"
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/internal/desktop"
 	"github.com/docker/compose/v2/internal/experimental"
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/compose/v2/pkg/compose"
 	ui "github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/compose/v2/pkg/remote"
 	"github.com/docker/compose/v2/pkg/utils"
@@ -59,7 +61,7 @@ const (
 	ComposeProjectName = "COMPOSE_PROJECT_NAME"
 	// ComposeCompatibility try to mimic compose v1 as much as possible
 	ComposeCompatibility = "COMPOSE_COMPATIBILITY"
-	// ComposeRemoveOrphans remove “orphaned" containers, i.e. containers tagged for current project but not declared as service
+	// ComposeRemoveOrphans remove "orphaned" containers, i.e. containers tagged for current project but not declared as service
 	ComposeRemoveOrphans = "COMPOSE_REMOVE_ORPHANS"
 	// ComposeIgnoreOrphans ignore "orphaned" containers
 	ComposeIgnoreOrphans = "COMPOSE_IGNORE_ORPHANS"
@@ -68,6 +70,26 @@ const (
 	// ComposeMenu defines if the navigation menu should be rendered. Can be also set via --menu
 	ComposeMenu = "COMPOSE_MENU"
 )
+
+// rawEnv load a dot env file using docker/cli key=value parser, without attempt to interpolate or evaluate values
+func rawEnv(r io.Reader, filename string, lookup func(key string) (string, bool)) (map[string]string, error) {
+	lines, err := kvfile.ParseFromReader(r, lookup)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse env_file %s: %w", filename, err)
+	}
+	vars := types.Mapping{}
+	for _, line := range lines {
+		key, value, _ := strings.Cut(line, "=")
+		vars[key] = value
+	}
+	return vars, nil
+}
+
+func init() {
+	// compose evaluates env file values for interpolation
+	// `raw` format allows to load env_file with the same parser used by docker run --env-file
+	dotenv.RegisterFormat("raw", rawEnv)
+}
 
 type Backend interface {
 	api.Service
@@ -98,18 +120,13 @@ func AdaptCmd(fn CobraCommand) func(cmd *cobra.Command, args []string) error {
 		}()
 
 		err := fn(ctx, cmd, args)
-		var composeErr compose.Error
 		if api.IsErrCanceled(err) || errors.Is(ctx.Err(), context.Canceled) {
 			err = dockercli.StatusError{
 				StatusCode: 130,
-				Status:     compose.CanceledStatus,
 			}
 		}
-		if errors.As(err, &composeErr) {
-			err = dockercli.StatusError{
-				StatusCode: composeErr.GetMetricsFailureCategory().ExitCode,
-				Status:     err.Error(),
-			}
+		if ui.Mode == ui.ModeJSON {
+			err = makeJSONError(err)
 		}
 		return err
 	}
@@ -165,6 +182,38 @@ func (o *ProjectOptions) WithServices(dockerCli command.Cli, fn ProjectServicesF
 
 		return fn(ctx, project, args)
 	})
+}
+
+type jsonErrorData struct {
+	Error   bool   `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+func errorAsJSON(message string) string {
+	errorMessage := &jsonErrorData{
+		Error:   true,
+		Message: message,
+	}
+	marshal, err := json.Marshal(errorMessage)
+	if err == nil {
+		return string(marshal)
+	} else {
+		return message
+	}
+}
+
+func makeJSONError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var statusErr dockercli.StatusError
+	if errors.As(err, &statusErr) {
+		return dockercli.StatusError{
+			StatusCode: statusErr.StatusCode,
+			Status:     errorAsJSON(statusErr.Status),
+		}
+	}
+	return fmt.Errorf("%s", errorAsJSON(err.Error()))
 }
 
 func (o *ProjectOptions) addProjectFlags(f *pflag.FlagSet) {
@@ -249,7 +298,7 @@ func (o *ProjectOptions) ToProject(ctx context.Context, dockerCli command.Cli, s
 
 	options, err := o.toProjectOptions(po...)
 	if err != nil {
-		return nil, metrics, compose.WrapComposeError(err)
+		return nil, metrics, err
 	}
 
 	options.WithListeners(func(event string, metadata map[string]any) {
@@ -281,7 +330,7 @@ func (o *ProjectOptions) ToProject(ctx context.Context, dockerCli command.Cli, s
 
 	project, err := options.LoadProject(ctx)
 	if err != nil {
-		return nil, metrics, compose.WrapComposeError(err)
+		return nil, metrics, err
 	}
 
 	if project.Name == "" {
@@ -308,11 +357,14 @@ func (o *ProjectOptions) ToProject(ctx context.Context, dockerCli command.Cli, s
 		project.Services[name] = s
 	}
 
+	project, err = project.WithSelectedServices(services)
+	if err != nil {
+		return nil, tracing.Metrics{}, err
+	}
+
 	if !o.All {
 		project = project.WithoutUnnecessaryResources()
 	}
-
-	project, err = project.WithSelectedServices(services)
 	return project, metrics, err
 }
 
@@ -329,11 +381,20 @@ func (o *ProjectOptions) toProjectOptions(po ...cli.ProjectOptionsFn) (*cli.Proj
 	return cli.NewProjectOptions(o.ConfigPaths,
 		append(po,
 			cli.WithWorkingDirectory(o.ProjectDir),
+			// First apply os.Environment, always win
 			cli.WithOsEnv,
+			// Load PWD/.env if present and no explicit --env-file has been set
+			cli.WithEnvFiles(o.EnvFiles...),
+			// read dot env file to populate project environment
+			cli.WithDotEnv,
+			// get compose file path set by COMPOSE_FILE
 			cli.WithConfigFileEnv,
+			// if none was selected, get default compose.yaml file from current dir or parent folder
 			cli.WithDefaultConfigPath,
+			// .. and then, a project directory != PWD maybe has been set so let's load .env file
 			cli.WithEnvFiles(o.EnvFiles...),
 			cli.WithDotEnv,
+			// eventually COMPOSE_PROFILES should have been set
 			cli.WithDefaultProfiles(o.Profiles...),
 			cli.WithName(o.ProjectName))...)
 }
@@ -383,22 +444,14 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 			}
 			_ = cmd.Help()
 			return dockercli.StatusError{
-				StatusCode: compose.CommandSyntaxFailure.ExitCode,
+				StatusCode: 1,
 				Status:     fmt.Sprintf("unknown docker command: %q", "compose "+args[0]),
 			}
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-
-			// (1) process env vars
-			err := setEnvWithLocalDotEnv(&opts)
-			if err != nil {
-				return err
-			}
 			parent := cmd.Root()
 
-			// (2) call parent pre-run
-			// TODO(milas): this seems incorrect, remove or document
 			if parent != nil {
 				parentPrerun := parent.PersistentPreRunE
 				if parentPrerun != nil {
@@ -409,9 +462,13 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				}
 			}
 
-			// (3) set up display/output
 			if verbose {
 				logrus.SetLevel(logrus.TraceLevel)
+			}
+
+			err := setEnvWithDotEnv(opts)
+			if err != nil {
+				return err
 			}
 			if noAnsi {
 				if ansi != "auto" {
@@ -455,6 +512,9 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				ui.Mode = ui.ModePlain
 			case ui.ModeQuiet, "none":
 				ui.Mode = ui.ModeQuiet
+			case ui.ModeJSON:
+				ui.Mode = ui.ModeJSON
+				logrus.SetFormatter(&logrus.JSONFormatter{})
 			default:
 				return fmt.Errorf("unsupported --progress value %q", opts.Progress)
 			}
@@ -469,7 +529,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 			}
 			for i, file := range opts.EnvFiles {
 				if !filepath.IsAbs(file) {
-					file, err = filepath.Abs(file)
+					file, err := filepath.Abs(file)
 					if err != nil {
 						return err
 					}
@@ -500,7 +560,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 				backend.MaxConcurrency(parallel)
 			}
 
-			// (5) dry run detection
+			// dry run detection
 			ctx, err = backend.DryRunMode(ctx, dryRun)
 			if err != nil {
 				return err
@@ -533,7 +593,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 	}
 
 	c.AddCommand(
-		upCommand(&opts, dockerCli, backend, experiments),
+		upCommand(&opts, dockerCli, backend),
 		downCommand(&opts, dockerCli, backend),
 		startCommand(&opts, dockerCli, backend),
 		restartCommand(&opts, dockerCli, backend),
@@ -547,6 +607,8 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 		removeCommand(&opts, dockerCli, backend),
 		execCommand(&opts, dockerCli, backend),
 		attachCommand(&opts, dockerCli, backend),
+		exportCommand(&opts, dockerCli, backend),
+		commitCommand(&opts, dockerCli, backend),
 		pauseCommand(&opts, dockerCli, backend),
 		unpauseCommand(&opts, dockerCli, backend),
 		topCommand(&opts, dockerCli, backend),
@@ -601,46 +663,35 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 	return c
 }
 
-// If user has a local .env file, load it as os.environment so it can be used to set COMPOSE_ variables
-// This also allows to override values set by the default .env in a compose project when ran from a distinct folder
-func setEnvWithLocalDotEnv(prjOpts *ProjectOptions) error {
-	if len(prjOpts.EnvFiles) > 0 {
+func setEnvWithDotEnv(opts ProjectOptions) error {
+	options, err := cli.NewProjectOptions(opts.ConfigPaths,
+		cli.WithWorkingDirectory(opts.ProjectDir),
+		cli.WithOsEnv,
+		cli.WithEnvFiles(opts.EnvFiles...),
+		cli.WithDotEnv,
+	)
+	if err != nil {
 		return nil
 	}
-
-	wd, err := os.Getwd()
+	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), options.EnvFiles)
 	if err != nil {
-		return compose.WrapComposeError(err)
-	}
-
-	defaultDotEnv := filepath.Join(wd, ".env")
-
-	s, err := os.Stat(defaultDotEnv)
-	if os.IsNotExist(err) || s.IsDir() {
 		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	envFromFile, err := dotenv.GetEnvFromFile(composegoutils.GetAsEqualsMap(os.Environ()), []string{defaultDotEnv})
-	if err != nil {
-		return err
 	}
 	for k, v := range envFromFile {
-		if _, ok := os.LookupEnv(k); !ok { // Precedence to OS Env
-			if err := os.Setenv(k, v); err != nil {
-				return err
+		if _, ok := os.LookupEnv(k); !ok {
+			if err = os.Setenv(k, v); err != nil {
+				return nil
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 var printerModes = []string{
 	ui.ModeAuto,
 	ui.ModeTTY,
 	ui.ModePlain,
+	ui.ModeJSON,
 	ui.ModeQuiet,
 }
 

@@ -63,6 +63,7 @@ func TestNetworkAliases(t *testing.T) {
 	c := NewParallelCLI(t)
 
 	const projectName = "network_alias_e2e"
+	defer c.cleanupWithDown(t, projectName)
 
 	t.Run("up", func(t *testing.T) {
 		c.RunDockerComposeCmd(t, "-f", "./fixtures/network-alias/compose.yaml", "--project-name", projectName, "up",
@@ -136,14 +137,47 @@ func TestNetworkModes(t *testing.T) {
 	c := NewCLI(t)
 
 	const projectName = "network_mode_service_run"
+	defer c.cleanupWithDown(t, projectName)
 
 	t.Run("run with service mode dependency", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/network-test/compose.yaml", "--project-name", projectName, "run", "-T", "mydb", "echo", "success")
 		res.Assert(t, icmd.Expected{Out: "success"})
+	})
+}
 
+func TestNetworkConfigChanged(t *testing.T) {
+	t.Skip("unstable")
+	// fixture is shared with TestNetworks and is not safe to run concurrently
+	c := NewCLI(t)
+	const projectName = "network_config_change"
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/network-test/compose.subnet.yaml", "--project-name", projectName, "up", "-d")
+	t.Cleanup(func() {
+		c.RunDockerComposeCmd(t, "--project-name", projectName, "down")
 	})
 
-	t.Run("down", func(t *testing.T) {
-		_ = c.RunDockerComposeCmd(t, "--project-name", projectName, "down")
+	res := c.RunDockerComposeCmd(t, "--project-name", projectName, "exec", "test", "hostname", "-i")
+	res.Assert(t, icmd.Expected{Out: "172.99.0."})
+	res.Combined()
+
+	cmd := c.NewCmdWithEnv([]string{"SUBNET=192.168.0.0/16"},
+		"docker", "compose", "-f", "./fixtures/network-test/compose.subnet.yaml", "--project-name", projectName, "up", "-d")
+	res = icmd.RunCmd(cmd)
+	res.Assert(t, icmd.Success)
+	out := res.Combined()
+	fmt.Println(out)
+
+	res = c.RunDockerComposeCmd(t, "--project-name", projectName, "exec", "test", "hostname", "-i")
+	res.Assert(t, icmd.Expected{Out: "192.168.0."})
+}
+
+func TestMacAddress(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "network_mac_address"
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/network-test/mac_address.yaml", "--project-name", projectName, "up", "-d")
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
 	})
+	res := c.RunDockerCmd(t, "inspect", fmt.Sprintf("%s-test-1", projectName), "-f", "{{ (index .NetworkSettings.Networks \"network_mac_address_default\" ).MacAddress }}")
+	res.Assert(t, icmd.Expected{Out: "00:e0:84:35:d0:e8"})
 }

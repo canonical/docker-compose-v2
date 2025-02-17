@@ -2,6 +2,15 @@
 # to check if yaml reference docs used in this repo are valid
 name: docs-upstream
 
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -21,7 +30,7 @@ on:
 
 jobs:
   docs-yaml:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
@@ -35,7 +44,7 @@ jobs:
           retention-days: 1
 
   validate:
-    uses: docker/docs/.github/workflows/validate-upstream.yml@919a9b9104a34a40b30d116529bcce589a544d1c  # pin for artifact v4 support: https://github.com/docker/docs/pull/19220
+    uses: docker/docs/.github/workflows/validate-upstream.yml@main
     needs:
       - docs-yaml
     with:

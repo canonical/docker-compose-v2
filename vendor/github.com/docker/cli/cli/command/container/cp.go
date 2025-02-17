@@ -15,9 +15,8 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/streams"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/system"
 	units "github.com/docker/go-units"
 	"github.com/morikuni/aec"
 	"github.com/pkg/errors"
@@ -235,7 +234,7 @@ func copyFromContainer(ctx context.Context, dockerCli command.Cli, copyConfig cp
 		// If the destination is a symbolic link, we should follow it.
 		if err == nil && srcStat.Mode&os.ModeSymlink != 0 {
 			linkTarget := srcStat.LinkTarget
-			if !system.IsAbs(linkTarget) {
+			if !isAbs(linkTarget) {
 				// Join with the parent directory.
 				srcParent, _ := archive.SplitPathDirEntry(srcPath)
 				linkTarget = filepath.Join(srcParent, linkTarget)
@@ -319,7 +318,7 @@ func copyToContainer(ctx context.Context, dockerCli command.Cli, copyConfig cpCo
 	// If the destination is a symbolic link, we should evaluate it.
 	if err == nil && dstStat.Mode&os.ModeSymlink != 0 {
 		linkTarget := dstStat.LinkTarget
-		if !system.IsAbs(linkTarget) {
+		if !isAbs(linkTarget) {
 			// Join with the parent directory.
 			dstParent, _ := archive.SplitPathDirEntry(dstPath)
 			linkTarget = filepath.Join(dstParent, linkTarget)
@@ -397,7 +396,7 @@ func copyToContainer(ctx context.Context, dockerCli command.Cli, copyConfig cpCo
 		}
 	}
 
-	options := types.CopyToContainerOptions{
+	options := container.CopyToContainerOptions{
 		AllowOverwriteDirWithFile: false,
 		CopyUIDGID:                copyConfig.copyUIDGID,
 	}
@@ -433,18 +432,30 @@ func copyToContainer(ctx context.Context, dockerCli command.Cli, copyConfig cpCo
 // so we have to check for a `/` or `.` prefix. Also, in the case of a Windows
 // client, a `:` could be part of an absolute Windows path, in which case it
 // is immediately proceeded by a backslash.
-func splitCpArg(arg string) (container, path string) {
-	if system.IsAbs(arg) {
+func splitCpArg(arg string) (ctr, path string) {
+	if isAbs(arg) {
 		// Explicit local absolute path, e.g., `C:\foo` or `/foo`.
 		return "", arg
 	}
 
-	container, path, ok := strings.Cut(arg, ":")
-	if !ok || strings.HasPrefix(container, ".") {
+	ctr, path, ok := strings.Cut(arg, ":")
+	if !ok || strings.HasPrefix(ctr, ".") {
 		// Either there's no `:` in the arg
 		// OR it's an explicit local relative path like `./file:name.txt`.
 		return "", arg
 	}
 
-	return container, path
+	return ctr, path
+}
+
+// IsAbs is a platform-agnostic wrapper for filepath.IsAbs.
+//
+// On Windows, golang filepath.IsAbs does not consider a path \windows\system32
+// as absolute as it doesn't start with a drive-letter/colon combination. However,
+// in docker we need to verify things such as WORKDIR /windows/system32 in
+// a Dockerfile (which gets translated to \windows\system32 when being processed
+// by the daemon). This SHOULD be treated as absolute from a docker processing
+// perspective.
+func isAbs(path string) bool {
+	return filepath.IsAbs(path) || strings.HasPrefix(path, string(os.PathSeparator))
 }

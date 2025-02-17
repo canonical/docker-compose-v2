@@ -116,7 +116,7 @@ func TestLocalComposeLargeLogs(t *testing.T) {
 	}
 	assert.NilError(t, f.Close())
 
-	cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/logs-test/cat.yaml", "--project-name", projectName, "up", "--abort-on-container-exit")
+	cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/logs-test/cat.yaml", "--project-name", projectName, "up", "--abort-on-container-exit", "--menu=false")
 	cmd.Stdout = io.Discard
 	res := icmd.RunCmd(cmd)
 	res.Assert(t, icmd.Expected{Out: "test-1 exited with code 0"})
@@ -128,6 +128,5 @@ func expectOutput(res *icmd.Result, expected string) func(t poll.LogT) poll.Resu
 			return poll.Success()
 		}
 		return poll.Continue("condition not met")
-
 	}
 }

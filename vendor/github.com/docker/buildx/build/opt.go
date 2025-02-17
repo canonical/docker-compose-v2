@@ -1,18 +1,19 @@
 package build
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/driver"
@@ -20,7 +21,6 @@ import (
 	"github.com/docker/buildx/util/dockerutil"
 	"github.com/docker/buildx/util/osutil"
 	"github.com/docker/buildx/util/progress"
-	"github.com/docker/docker/builder/remotecontext/urlutil"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/ociindex"
@@ -35,7 +35,7 @@ import (
 	"github.com/tonistiigi/fsutil"
 )
 
-func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt Options, bopts gateway.BuildOpts, configDir string, addVCSLocalDir func(key, dir string, so *client.SolveOpt), pw progress.Writer, docker *dockerutil.Client) (_ *client.SolveOpt, release func(), err error) {
+func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *Options, bopts gateway.BuildOpts, cfg *confutil.Config, pw progress.Writer, docker *dockerutil.Client) (_ *client.SolveOpt, release func(), err error) {
 	nodeDriver := node.Driver
 	defers := make([]func(), 0, 2)
 	releaseF := func() {
@@ -105,10 +105,6 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt Op
 		SourcePolicy:        opt.SourcePolicy,
 	}
 
-	if so.Ref == "" {
-		so.Ref = identity.NewID()
-	}
-
 	if opt.CgroupParent != "" {
 		so.FrontendAttrs["cgroup-parent"] = opt.CgroupParent
 	}
@@ -162,7 +158,7 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt Op
 	case 1:
 		// valid
 	case 0:
-		if !noDefaultLoad() && opt.PrintFunc == nil {
+		if !noDefaultLoad() && opt.CallFunc == nil {
 			if nodeDriver.IsMobyDriver() {
 				// backwards compat for docker driver only:
 				// this ensures the build results in a docker image.
@@ -259,25 +255,23 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt Op
 		if e.Type == "docker" || e.Type == "image" || e.Type == "oci" {
 			// inline buildinfo attrs from build arg
 			if v, ok := opt.BuildArgs["BUILDKIT_INLINE_BUILDINFO_ATTRS"]; ok {
-				e.Attrs["buildinfo-attrs"] = v
+				opt.Exports[i].Attrs["buildinfo-attrs"] = v
 			}
 		}
 	}
 
 	so.Exports = opt.Exports
-	so.Session = opt.Session
+	so.Session = slices.Clone(opt.Session)
 
-	releaseLoad, err := loadInputs(ctx, nodeDriver, opt.Inputs, addVCSLocalDir, pw, &so)
+	releaseLoad, err := loadInputs(ctx, nodeDriver, &opt.Inputs, pw, &so)
 	if err != nil {
 		return nil, nil, err
 	}
 	defers = append(defers, releaseLoad)
 
-	if sharedKey := so.LocalDirs["context"]; sharedKey != "" {
-		if p, err := filepath.Abs(sharedKey); err == nil {
-			sharedKey = filepath.Base(p)
-		}
-		so.SharedKey = sharedKey + ":" + confutil.TryNodeIdentifier(configDir)
+	// add node identifier to shared key if one was specified
+	if so.SharedKey != "" {
+		so.SharedKey += ":" + cfg.TryNodeIdentifier()
 	}
 
 	if opt.Pull {
@@ -354,15 +348,15 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt Op
 		so.FrontendAttrs["ulimit"] = ulimits
 	}
 
-	// mark info request as internal
-	if opt.PrintFunc != nil {
+	// mark call request as internal
+	if opt.CallFunc != nil {
 		so.Internal = true
 	}
 
 	return &so, releaseF, nil
 }
 
-func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSLocalDir func(key, dir string, so *client.SolveOpt), pw progress.Writer, target *client.SolveOpt) (func(), error) {
+func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw progress.Writer, target *client.SolveOpt) (func(), error) {
 	if inp.ContextPath == "" {
 		return nil, errors.New("please specify build context (e.g. \".\" for the current directory)")
 	}
@@ -370,11 +364,12 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 	// TODO: handle stdin, symlinks, remote contexts, check files exist
 
 	var (
-		err              error
-		dockerfileReader io.Reader
-		dockerfileDir    string
-		dockerfileName   = inp.DockerfilePath
-		toRemove         []string
+		err               error
+		dockerfileReader  io.ReadCloser
+		dockerfileDir     string
+		dockerfileName    = inp.DockerfilePath
+		dockerfileSrcName = inp.DockerfilePath
+		toRemove          []string
 	)
 
 	switch {
@@ -386,11 +381,11 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 		target.FrontendInputs["dockerfile"] = *inp.ContextState
 	case inp.ContextPath == "-":
 		if inp.DockerfilePath == "-" {
-			return nil, errStdinConflict
+			return nil, errors.Errorf("invalid argument: can't use stdin for both build context and dockerfile")
 		}
 
-		buf := bufio.NewReader(inp.InStream)
-		magic, err := buf.Peek(archiveHeaderSize * 2)
+		rc := inp.InStream.NewReadCloser()
+		magic, err := inp.InStream.Peek(archiveHeaderSize * 2)
 		if err != nil && err != io.EOF {
 			return nil, errors.Wrap(err, "failed to peek context header from STDIN")
 		}
@@ -398,28 +393,33 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 			if isArchive(magic) {
 				// stdin is context
 				up := uploadprovider.New()
-				target.FrontendAttrs["context"] = up.Add(buf)
+				target.FrontendAttrs["context"] = up.Add(rc)
 				target.Session = append(target.Session, up)
 			} else {
 				if inp.DockerfilePath != "" {
-					return nil, errDockerfileConflict
+					return nil, errors.Errorf("ambiguous Dockerfile source: both stdin and flag correspond to Dockerfiles")
 				}
 				// stdin is dockerfile
-				dockerfileReader = buf
+				dockerfileReader = rc
 				inp.ContextPath, _ = os.MkdirTemp("", "empty-dir")
 				toRemove = append(toRemove, inp.ContextPath)
-				if err := setLocalMount("context", inp.ContextPath, target, addVCSLocalDir); err != nil {
+				if err := setLocalMount("context", inp.ContextPath, target); err != nil {
 					return nil, err
 				}
 			}
 		}
 	case osutil.IsLocalDir(inp.ContextPath):
-		if err := setLocalMount("context", inp.ContextPath, target, addVCSLocalDir); err != nil {
+		if err := setLocalMount("context", inp.ContextPath, target); err != nil {
 			return nil, err
 		}
+		sharedKey := inp.ContextPath
+		if p, err := filepath.Abs(sharedKey); err == nil {
+			sharedKey = filepath.Base(p)
+		}
+		target.SharedKey = sharedKey
 		switch inp.DockerfilePath {
 		case "-":
-			dockerfileReader = inp.InStream
+			dockerfileReader = inp.InStream.NewReadCloser()
 		case "":
 			dockerfileDir = inp.ContextPath
 		default:
@@ -428,7 +428,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 		}
 	case IsRemoteURL(inp.ContextPath):
 		if inp.DockerfilePath == "-" {
-			dockerfileReader = inp.InStream
+			dockerfileReader = inp.InStream.NewReadCloser()
 		} else if filepath.IsAbs(inp.DockerfilePath) {
 			dockerfileDir = filepath.Dir(inp.DockerfilePath)
 			dockerfileName = filepath.Base(inp.DockerfilePath)
@@ -440,11 +440,16 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 	}
 
 	if inp.DockerfileInline != "" {
-		dockerfileReader = strings.NewReader(inp.DockerfileInline)
+		dockerfileReader = io.NopCloser(strings.NewReader(inp.DockerfileInline))
+		dockerfileSrcName = "inline"
+	} else if inp.DockerfilePath == "-" {
+		dockerfileSrcName = "stdin"
+	} else if inp.DockerfilePath == "" {
+		dockerfileSrcName = filepath.Join(inp.ContextPath, "Dockerfile")
 	}
 
 	if dockerfileReader != nil {
-		dockerfileDir, err = createTempDockerfile(dockerfileReader)
+		dockerfileDir, err = createTempDockerfile(dockerfileReader, inp.InStream)
 		if err != nil {
 			return nil, err
 		}
@@ -452,7 +457,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 		dockerfileName = "Dockerfile"
 		target.FrontendAttrs["dockerfilekey"] = "dockerfile"
 	}
-	if urlutil.IsURL(inp.DockerfilePath) {
+	if isHTTPURL(inp.DockerfilePath) {
 		dockerfileDir, err = createTempDockerfileFromURL(ctx, d, inp.DockerfilePath, pw)
 		if err != nil {
 			return nil, err
@@ -468,7 +473,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 	}
 
 	if dockerfileDir != "" {
-		if err := setLocalMount("dockerfile", dockerfileDir, target, addVCSLocalDir); err != nil {
+		if err := setLocalMount("dockerfile", dockerfileDir, target); err != nil {
 			return nil, err
 		}
 		dockerfileName = handleLowercaseDockerfile(dockerfileDir, dockerfileName)
@@ -494,45 +499,18 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 
 		// handle OCI layout
 		if strings.HasPrefix(v.Path, "oci-layout://") {
-			pathAlone := strings.TrimPrefix(v.Path, "oci-layout://")
-			localPath := pathAlone
+			localPath := strings.TrimPrefix(v.Path, "oci-layout://")
 			localPath, dig, hasDigest := strings.Cut(localPath, "@")
 			localPath, tag, hasTag := strings.Cut(localPath, ":")
 			if !hasTag {
 				tag = "latest"
-				hasTag = true
 			}
-			idx := ociindex.NewStoreIndex(localPath)
 			if !hasDigest {
-				// lookup by name
-				desc, err := idx.Get(tag)
+				dig, err = resolveDigest(localPath, tag)
 				if err != nil {
-					return nil, err
-				}
-				if desc != nil {
-					dig = string(desc.Digest)
-					hasDigest = true
+					return nil, errors.Wrapf(err, "oci-layout reference %q could not be resolved", v.Path)
 				}
 			}
-			if !hasDigest {
-				// lookup single
-				desc, err := idx.GetSingle()
-				if err != nil {
-					return nil, err
-				}
-				if desc != nil {
-					dig = string(desc.Digest)
-					hasDigest = true
-				}
-			}
-			if !hasDigest {
-				return nil, errors.Errorf("oci-layout reference %q could not be resolved", v.Path)
-			}
-			_, err := digest.Parse(dig)
-			if err != nil {
-				return nil, errors.Wrapf(err, "invalid oci-layout digest %s", dig)
-			}
-
 			store, err := local.NewStore(localPath)
 			if err != nil {
 				return nil, errors.Wrapf(err, "invalid store at %s", localPath)
@@ -543,15 +521,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 			}
 			target.OCIStores[storeName] = store
 
-			layout := "oci-layout://" + storeName
-			if hasTag {
-				layout += ":" + tag
-			}
-			if hasDigest {
-				layout += "@" + dig
-			}
-
-			target.FrontendAttrs["context:"+k] = layout
+			target.FrontendAttrs["context:"+k] = "oci-layout://" + storeName + ":" + tag + "@" + dig
 			continue
 		}
 		st, err := os.Stat(v.Path)
@@ -565,7 +535,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 		if k == "context" || k == "dockerfile" {
 			localName = "_" + k // underscore to avoid collisions
 		}
-		if err := setLocalMount(localName, v.Path, target, addVCSLocalDir); err != nil {
+		if err := setLocalMount(localName, v.Path, target); err != nil {
 			return nil, err
 		}
 		target.FrontendAttrs["context:"+k] = "local:" + localName
@@ -573,32 +543,56 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp Inputs, addVCSL
 
 	release := func() {
 		for _, dir := range toRemove {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 		}
 	}
+
+	inp.DockerfileMappingSrc = dockerfileSrcName
+	inp.DockerfileMappingDst = dockerfileName
 	return release, nil
 }
 
-func setLocalMount(name, root string, so *client.SolveOpt, addVCSLocalDir func(key, dir string, so *client.SolveOpt)) error {
-	lm, err := fsutil.NewFS(root)
+func resolveDigest(localPath, tag string) (dig string, _ error) {
+	idx := ociindex.NewStoreIndex(localPath)
+
+	// lookup by name
+	desc, err := idx.Get(tag)
 	if err != nil {
-		return err
+		return "", err
 	}
-	root, err = filepath.EvalSymlinks(root) // keep same behavior as fsutil.NewFS
+	if desc == nil {
+		// lookup single
+		desc, err = idx.GetSingle()
+		if err != nil {
+			return "", err
+		}
+	}
+	if desc == nil {
+		return "", errors.New("failed to resolve digest")
+	}
+
+	dig = string(desc.Digest)
+	_, err = digest.Parse(dig)
+	if err != nil {
+		return "", errors.Wrapf(err, "invalid digest %s", dig)
+	}
+
+	return dig, nil
+}
+
+func setLocalMount(name, dir string, so *client.SolveOpt) error {
+	lm, err := fsutil.NewFS(dir)
 	if err != nil {
 		return err
 	}
 	if so.LocalMounts == nil {
 		so.LocalMounts = map[string]fsutil.FS{}
 	}
-	so.LocalMounts[name] = lm
-	if addVCSLocalDir != nil {
-		addVCSLocalDir(name, root, so)
-	}
+	so.LocalMounts[name] = &fs{FS: lm, dir: dir}
 	return nil
 }
 
-func createTempDockerfile(r io.Reader) (string, error) {
+func createTempDockerfile(r io.Reader, multiReader *SyncMultiReader) (string, error) {
 	dir, err := os.MkdirTemp("", "dockerfile")
 	if err != nil {
 		return "", err
@@ -608,6 +602,16 @@ func createTempDockerfile(r io.Reader) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+
+	if multiReader != nil {
+		dt, err := io.ReadAll(r)
+		if err != nil {
+			return "", err
+		}
+		multiReader.Reset(dt)
+		r = bytes.NewReader(dt)
+	}
+
 	if _, err := io.Copy(f, r); err != nil {
 		return "", err
 	}
@@ -644,3 +648,10 @@ func handleLowercaseDockerfile(dir, p string) string {
 	}
 	return p
 }
+
+type fs struct {
+	fsutil.FS
+	dir string
+}
+
+var _ fsutil.FS = &fs{}

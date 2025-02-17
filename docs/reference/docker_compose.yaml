@@ -1,9 +1,233 @@
 command: docker compose
 short: Docker Compose
-long: |-
-    You can use the compose subcommand, `docker compose [-f <arg>...] [options] [COMMAND] [ARGS...]`, to build and manage
-    multiple services in Docker containers.
-
+long: Define and run multi-container applications with Docker
+usage: docker compose
+pname: docker
+plink: docker.yaml
+cname:
+    - docker compose attach
+    - docker compose build
+    - docker compose commit
+    - docker compose config
+    - docker compose cp
+    - docker compose create
+    - docker compose down
+    - docker compose events
+    - docker compose exec
+    - docker compose export
+    - docker compose images
+    - docker compose kill
+    - docker compose logs
+    - docker compose ls
+    - docker compose pause
+    - docker compose port
+    - docker compose ps
+    - docker compose pull
+    - docker compose push
+    - docker compose restart
+    - docker compose rm
+    - docker compose run
+    - docker compose scale
+    - docker compose start
+    - docker compose stats
+    - docker compose stop
+    - docker compose top
+    - docker compose unpause
+    - docker compose up
+    - docker compose version
+    - docker compose wait
+    - docker compose watch
+clink:
+    - docker_compose_attach.yaml
+    - docker_compose_build.yaml
+    - docker_compose_commit.yaml
+    - docker_compose_config.yaml
+    - docker_compose_cp.yaml
+    - docker_compose_create.yaml
+    - docker_compose_down.yaml
+    - docker_compose_events.yaml
+    - docker_compose_exec.yaml
+    - docker_compose_export.yaml
+    - docker_compose_images.yaml
+    - docker_compose_kill.yaml
+    - docker_compose_logs.yaml
+    - docker_compose_ls.yaml
+    - docker_compose_pause.yaml
+    - docker_compose_port.yaml
+    - docker_compose_ps.yaml
+    - docker_compose_pull.yaml
+    - docker_compose_push.yaml
+    - docker_compose_restart.yaml
+    - docker_compose_rm.yaml
+    - docker_compose_run.yaml
+    - docker_compose_scale.yaml
+    - docker_compose_start.yaml
+    - docker_compose_stats.yaml
+    - docker_compose_stop.yaml
+    - docker_compose_top.yaml
+    - docker_compose_unpause.yaml
+    - docker_compose_up.yaml
+    - docker_compose_version.yaml
+    - docker_compose_wait.yaml
+    - docker_compose_watch.yaml
+options:
+    - option: all-resources
+      value_type: bool
+      default_value: "false"
+      description: Include all resources, even those not used by services
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: ansi
+      value_type: string
+      default_value: auto
+      description: |
+        Control when to print ANSI control characters ("never"|"always"|"auto")
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: compatibility
+      value_type: bool
+      default_value: "false"
+      description: Run compose in backward compatibility mode
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: dry-run
+      value_type: bool
+      default_value: "false"
+      description: Execute command in dry run mode
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: env-file
+      value_type: stringArray
+      default_value: '[]'
+      description: Specify an alternate environment file
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: file
+      shorthand: f
+      value_type: stringArray
+      default_value: '[]'
+      description: Compose configuration files
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: no-ansi
+      value_type: bool
+      default_value: "false"
+      description: Do not print ANSI control characters (DEPRECATED)
+      deprecated: false
+      hidden: true
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: parallel
+      value_type: int
+      default_value: "-1"
+      description: Control max parallelism, -1 for unlimited
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: profile
+      value_type: stringArray
+      default_value: '[]'
+      description: Specify a profile to enable
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: progress
+      value_type: string
+      default_value: auto
+      description: Set type of progress output (auto, tty, plain, json, quiet)
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: project-directory
+      value_type: string
+      description: |-
+        Specify an alternate working directory
+        (default: the path of the, first specified, Compose file)
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: project-name
+      shorthand: p
+      value_type: string
+      description: Project name
+      deprecated: false
+      hidden: false
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: verbose
+      value_type: bool
+      default_value: "false"
+      description: Show more output
+      deprecated: false
+      hidden: true
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: version
+      shorthand: v
+      value_type: bool
+      default_value: "false"
+      description: Show the Docker Compose version information
+      deprecated: false
+      hidden: true
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+    - option: workdir
+      value_type: string
+      description: |-
+        DEPRECATED! USE --project-directory INSTEAD.
+        Specify an alternate working directory
+        (default: the path of the, first specified, Compose file)
+      deprecated: false
+      hidden: true
+      experimental: false
+      experimentalcli: false
+      kubernetes: false
+      swarm: false
+examples: |-
     ### Use `-f` to specify the name and path of one or more Compose files
     Use the `-f` flag to specify the location of a Compose configuration file.
 
@@ -145,228 +369,6 @@ long: |-
     Next, the containers are created. The `db` service is started, and the `backend` and `proxy` wait until the `db` service is healthy before starting.
 
     Dry Run mode works with almost all commands. You cannot use Dry Run mode with a command that doesn't change the state of a Compose stack such as `ps`, `ls`, `logs` for example.
-usage: docker compose
-pname: docker
-plink: docker.yaml
-cname:
-    - docker compose attach
-    - docker compose build
-    - docker compose config
-    - docker compose cp
-    - docker compose create
-    - docker compose down
-    - docker compose events
-    - docker compose exec
-    - docker compose images
-    - docker compose kill
-    - docker compose logs
-    - docker compose ls
-    - docker compose pause
-    - docker compose port
-    - docker compose ps
-    - docker compose pull
-    - docker compose push
-    - docker compose restart
-    - docker compose rm
-    - docker compose run
-    - docker compose scale
-    - docker compose start
-    - docker compose stats
-    - docker compose stop
-    - docker compose top
-    - docker compose unpause
-    - docker compose up
-    - docker compose version
-    - docker compose wait
-    - docker compose watch
-clink:
-    - docker_compose_attach.yaml
-    - docker_compose_build.yaml
-    - docker_compose_config.yaml
-    - docker_compose_cp.yaml
-    - docker_compose_create.yaml
-    - docker_compose_down.yaml
-    - docker_compose_events.yaml
-    - docker_compose_exec.yaml
-    - docker_compose_images.yaml
-    - docker_compose_kill.yaml
-    - docker_compose_logs.yaml
-    - docker_compose_ls.yaml
-    - docker_compose_pause.yaml
-    - docker_compose_port.yaml
-    - docker_compose_ps.yaml
-    - docker_compose_pull.yaml
-    - docker_compose_push.yaml
-    - docker_compose_restart.yaml
-    - docker_compose_rm.yaml
-    - docker_compose_run.yaml
-    - docker_compose_scale.yaml
-    - docker_compose_start.yaml
-    - docker_compose_stats.yaml
-    - docker_compose_stop.yaml
-    - docker_compose_top.yaml
-    - docker_compose_unpause.yaml
-    - docker_compose_up.yaml
-    - docker_compose_version.yaml
-    - docker_compose_wait.yaml
-    - docker_compose_watch.yaml
-options:
-    - option: all-resources
-      value_type: bool
-      default_value: "false"
-      description: Include all resources, even those not used by services
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: ansi
-      value_type: string
-      default_value: auto
-      description: |
-        Control when to print ANSI control characters ("never"|"always"|"auto")
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: compatibility
-      value_type: bool
-      default_value: "false"
-      description: Run compose in backward compatibility mode
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: dry-run
-      value_type: bool
-      default_value: "false"
-      description: Execute command in dry run mode
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: env-file
-      value_type: stringArray
-      default_value: '[]'
-      description: Specify an alternate environment file
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: file
-      shorthand: f
-      value_type: stringArray
-      default_value: '[]'
-      description: Compose configuration files
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: no-ansi
-      value_type: bool
-      default_value: "false"
-      description: Do not print ANSI control characters (DEPRECATED)
-      deprecated: false
-      hidden: true
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: parallel
-      value_type: int
-      default_value: "-1"
-      description: Control max parallelism, -1 for unlimited
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: profile
-      value_type: stringArray
-      default_value: '[]'
-      description: Specify a profile to enable
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: progress
-      value_type: string
-      default_value: auto
-      description: Set type of progress output (auto, tty, plain, quiet)
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: project-directory
-      value_type: string
-      description: |-
-        Specify an alternate working directory
-        (default: the path of the, first specified, Compose file)
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: project-name
-      shorthand: p
-      value_type: string
-      description: Project name
-      deprecated: false
-      hidden: false
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: verbose
-      value_type: bool
-      default_value: "false"
-      description: Show more output
-      deprecated: false
-      hidden: true
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: version
-      shorthand: v
-      value_type: bool
-      default_value: "false"
-      description: Show the Docker Compose version information
-      deprecated: false
-      hidden: true
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
-    - option: workdir
-      value_type: string
-      description: |-
-        DEPRECATED! USE --project-directory INSTEAD.
-        Specify an alternate working directory
-        (default: the path of the, first specified, Compose file)
-      deprecated: false
-      hidden: true
-      experimental: false
-      experimentalcli: false
-      kubernetes: false
-      swarm: false
 deprecated: false
 hidden: false
 experimental: false

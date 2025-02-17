@@ -27,6 +27,7 @@ import (
 
 func TestLocalComposeRun(t *testing.T) {
 	c := NewParallelCLI(t)
+	defer c.cleanupWithDown(t, "run-test")
 
 	t.Run("compose run", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/compose.yaml", "run", "back")
@@ -37,7 +38,7 @@ func TestLocalComposeRun(t *testing.T) {
 			"Hello one more time")
 		lines = Lines(res.Stdout())
 		assert.Equal(t, lines[len(lines)-1], "Hello one more time", res.Stdout())
-		assert.Assert(t, !strings.Contains(res.Combined(), "orphan"))
+		assert.Assert(t, strings.Contains(res.Combined(), "orphan"))
 	})
 
 	t.Run("check run container exited", func(t *testing.T) {
@@ -62,7 +63,6 @@ func TestLocalComposeRun(t *testing.T) {
 		assert.Assert(t, runContainerID != "")
 		res = c.RunDockerCmd(t, "inspect", runContainerID)
 		res.Assert(t, icmd.Expected{Out: ` "Status": "exited"`})
-		res.Assert(t, icmd.Expected{Out: `"com.docker.compose.container-number": "1"`})
 		res.Assert(t, icmd.Expected{Out: `"com.docker.compose.project": "run-test"`})
 		res.Assert(t, icmd.Expected{Out: `"com.docker.compose.oneoff": "True",`})
 		res.Assert(t, icmd.Expected{Out: `"com.docker.compose.slug": "` + truncatedSlug})
@@ -135,7 +135,7 @@ func TestLocalComposeRun(t *testing.T) {
 
 	t.Run("run starts only container and dependencies", func(t *testing.T) {
 		// ensure that even if another service is up run does not start it: https://github.com/docker/compose/issues/9459
-		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/deps.yaml", "up", "service_b")
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/deps.yaml", "up", "service_b", "--menu=false")
 		res.Assert(t, icmd.Success)
 
 		res = c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/deps.yaml", "run", "service_a")
@@ -162,11 +162,20 @@ func TestLocalComposeRun(t *testing.T) {
 	})
 
 	t.Run("--quiet-pull", func(t *testing.T) {
-		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/quiet-pull.yaml", "down", "--rmi", "all")
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/quiet-pull.yaml", "down", "--remove-orphans", "--rmi", "all")
 		res.Assert(t, icmd.Success)
 
 		res = c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/quiet-pull.yaml", "run", "--quiet-pull", "backend")
 		assert.Assert(t, !strings.Contains(res.Combined(), "Pull complete"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "Pulled"), res.Combined())
+	})
+
+	t.Run("--pull", func(t *testing.T) {
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/pull.yaml", "down", "--remove-orphans", "--rmi", "all")
+		res.Assert(t, icmd.Success)
+
+		res = c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/pull.yaml", "run", "--pull", "always", "backend")
+		assert.Assert(t, strings.Contains(res.Combined(), "backend Pulling"), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "backend Pulled"), res.Combined())
 	})
 }
