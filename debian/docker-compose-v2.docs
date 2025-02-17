@@ -1,10 +1,18 @@
 # Add NOTICE files because of Apache-2.0 license requirement
-vendor/github.com/containerd/containerd/NOTICE
-vendor/github.com/docker/cli/NOTICE
 vendor/github.com/docker/docker/NOTICE
+vendor/github.com/docker/cli/NOTICE
 vendor/github.com/docker/go-metrics/NOTICE
+vendor/github.com/containerd/containerd/v2/NOTICE
+vendor/github.com/compose-spec/compose-go/v2/NOTICE
 vendor/github.com/moby/patternmatcher/NOTICE
+vendor/github.com/moby/spdystream/NOTICE
+vendor/github.com/aws/aws-sdk-go-v2/NOTICE.txt
+vendor/github.com/aws/smithy-go/NOTICE
+vendor/github.com/prometheus/procfs/NOTICE
+vendor/github.com/prometheus/client_model/NOTICE
 vendor/github.com/prometheus/client_golang/NOTICE
-vendor/google.golang.org/grpc/NOTICE.txt
-vendor/gopkg.in/yaml.v2/NOTICE
+vendor/github.com/prometheus/common/NOTICE
+vendor/sigs.k8s.io/yaml/goyaml.v2/NOTICE
 vendor/gopkg.in/yaml.v3/NOTICE
+vendor/gopkg.in/yaml.v2/NOTICE
+vendor/google.golang.org/grpc/NOTICE.txt
