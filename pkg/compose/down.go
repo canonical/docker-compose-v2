@@ -31,7 +31,9 @@ import (
 	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	imageapi "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -65,10 +67,17 @@ func (s *composeService) down(ctx context.Context, projectName string, options a
 	}
 
 	// Check requested services exists in model
-	options.Services, err = checkSelectedServices(options, project)
+	services, err := checkSelectedServices(options, project)
 	if err != nil {
 		return err
 	}
+
+	if len(options.Services) > 0 && len(services) == 0 {
+		logrus.Infof("Any of the services %v not running in project %q", options.Services, projectName)
+		return nil
+	}
+
+	options.Services = services
 
 	if len(containers) > 0 {
 		resourceToRemove = true
@@ -76,7 +85,8 @@ func (s *composeService) down(ctx context.Context, projectName string, options a
 
 	err = InReverseDependencyOrder(ctx, project, func(c context.Context, service string) error {
 		serviceContainers := containers.filter(isService(service))
-		err := s.removeContainers(ctx, serviceContainers, options.Timeout, options.Volumes)
+		serv := project.Services[service]
+		err := s.removeContainers(ctx, serviceContainers, &serv, options.Timeout, options.Volumes)
 		return err
 	}, WithRootNodesAndDown(options.Services))
 	if err != nil {
@@ -85,7 +95,7 @@ func (s *composeService) down(ctx context.Context, projectName string, options a
 
 	orphans := containers.filter(isOrphaned(project))
 	if options.RemoveOrphans && len(orphans) > 0 {
-		err := s.removeContainers(ctx, orphans, options.Timeout, false)
+		err := s.removeContainers(ctx, orphans, nil, options.Timeout, false)
 		if err != nil {
 			return err
 		}
@@ -106,7 +116,7 @@ func (s *composeService) down(ctx context.Context, projectName string, options a
 	}
 
 	if !resourceToRemove && len(ops) == 0 {
-		fmt.Fprintf(s.stderr(), "Warning: No resource found to remove for project %q.\n", projectName)
+		logrus.Warnf("Warning: No resource found to remove for project %q.", projectName)
 	}
 
 	eg, _ := errgroup.WithContext(ctx)
@@ -193,7 +203,7 @@ func (s *composeService) ensureNetworksDown(ctx context.Context, project *types.
 }
 
 func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName string, projectName string, name string, w progress.Writer) error {
-	networks, err := s.apiClient().NetworkList(ctx, moby.NetworkListOptions{
+	networks, err := s.apiClient().NetworkList(ctx, network.ListOptions{
 		Filters: filters.NewArgs(
 			projectFilter(projectName),
 			networkFilter(composeNetworkName)),
@@ -214,7 +224,7 @@ func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName s
 		if net.Name != name {
 			continue
 		}
-		network, err := s.apiClient().NetworkInspect(ctx, net.ID, moby.NetworkInspectOptions{})
+		nw, err := s.apiClient().NetworkInspect(ctx, net.ID, network.InspectOptions{})
 		if errdefs.IsNotFound(err) {
 			w.Event(progress.NewEvent(eventName, progress.Warning, "No resource found to remove"))
 			return nil
@@ -222,7 +232,7 @@ func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName s
 		if err != nil {
 			return err
 		}
-		if len(network.Containers) > 0 {
+		if len(nw.Containers) > 0 {
 			w.Event(progress.NewEvent(eventName, progress.Warning, "Resource is still in use"))
 			found++
 			continue
@@ -287,9 +297,19 @@ func (s *composeService) removeVolume(ctx context.Context, id string, w progress
 	return err
 }
 
-func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, container moby.Container, timeout *time.Duration) error {
+func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, service *types.ServiceConfig, container moby.Container, timeout *time.Duration) error {
 	eventName := getContainerProgressName(container)
 	w.Event(progress.StoppingEvent(eventName))
+
+	if service != nil {
+		for _, hook := range service.PreStop {
+			err := s.runHook(ctx, container, *service, hook, nil)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
 	timeoutInSecond := utils.DurationSecondToInt(timeout)
 	err := s.apiClient().ContainerStop(ctx, container.ID, containerType.StopOptions{Timeout: timeoutInSecond})
 	if err != nil {
@@ -300,32 +320,34 @@ func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, c
 	return nil
 }
 
-func (s *composeService) stopContainers(ctx context.Context, w progress.Writer, containers []moby.Container, timeout *time.Duration) error {
+func (s *composeService) stopContainers(ctx context.Context, w progress.Writer, serv *types.ServiceConfig, containers []moby.Container, timeout *time.Duration) error {
 	eg, ctx := errgroup.WithContext(ctx)
-	for _, container := range containers {
-		container := container
+	for _, ctr := range containers {
 		eg.Go(func() error {
-			return s.stopContainer(ctx, w, container, timeout)
+			return s.stopContainer(ctx, w, serv, ctr, timeout)
 		})
 	}
 	return eg.Wait()
 }
 
-func (s *composeService) removeContainers(ctx context.Context, containers []moby.Container, timeout *time.Duration, volumes bool) error {
+func (s *composeService) removeContainers(ctx context.Context, containers []moby.Container, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
 	eg, _ := errgroup.WithContext(ctx)
-	for _, container := range containers {
-		container := container
+	for _, ctr := range containers {
 		eg.Go(func() error {
-			return s.stopAndRemoveContainer(ctx, container, timeout, volumes)
+			return s.stopAndRemoveContainer(ctx, ctr, service, timeout, volumes)
 		})
 	}
 	return eg.Wait()
 }
 
-func (s *composeService) stopAndRemoveContainer(ctx context.Context, container moby.Container, timeout *time.Duration, volumes bool) error {
+func (s *composeService) stopAndRemoveContainer(ctx context.Context, container moby.Container, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
 	w := progress.ContextWriter(ctx)
 	eventName := getContainerProgressName(container)
-	err := s.stopContainer(ctx, w, container, timeout)
+	err := s.stopContainer(ctx, w, service, container, timeout)
+	if errdefs.IsNotFound(err) {
+		w.Event(progress.RemovedEvent(eventName))
+		return nil
+	}
 	if err != nil {
 		return err
 	}

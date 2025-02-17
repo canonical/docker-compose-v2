@@ -29,6 +29,8 @@ type publishOptions struct {
 	*ProjectOptions
 	resolveImageDigests bool
 	ociVersion          string
+	withEnvironment     bool
+	assumeYes           bool
 }
 
 func publishCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
@@ -36,7 +38,7 @@ func publishCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Servic
 		ProjectOptions: p,
 	}
 	cmd := &cobra.Command{
-		Use:   "publish [OPTIONS] [REPOSITORY]",
+		Use:   "publish [OPTIONS] REPOSITORY[:TAG]",
 		Short: "Publish compose application",
 		RunE: Adapt(func(ctx context.Context, args []string) error {
 			return runPublish(ctx, dockerCli, backend, opts, args[0])
@@ -45,7 +47,10 @@ func publishCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Servic
 	}
 	flags := cmd.Flags()
 	flags.BoolVar(&opts.resolveImageDigests, "resolve-image-digests", false, "Pin image tags to digests")
-	flags.StringVar(&opts.ociVersion, "oci-version", "", "OCI Image/Artifact specification version (automatically determined by default)")
+	flags.StringVar(&opts.ociVersion, "oci-version", "", "OCI image/artifact specification version (automatically determined by default)")
+	flags.BoolVar(&opts.withEnvironment, "with-env", false, "Include environment variables in the published OCI artifact")
+	flags.BoolVarP(&opts.assumeYes, "y", "y", false, `Assume "yes" as answer to all prompts`)
+
 	return cmd
 }
 
@@ -58,5 +63,7 @@ func runPublish(ctx context.Context, dockerCli command.Cli, backend api.Service,
 	return backend.Publish(ctx, project, repository, api.PublishOptions{
 		ResolveImageDigests: opts.resolveImageDigests,
 		OCIVersion:          api.OCIVersion(opts.ociVersion),
+		WithEnvironment:     opts.withEnvironment,
+		AssumeYes:           opts.assumeYes,
 	})
 }

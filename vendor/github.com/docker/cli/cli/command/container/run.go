@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"syscall"
 
@@ -70,22 +69,16 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 	command.AddTrustVerificationFlags(flags, &options.untrusted, dockerCli.ContentTrustEnabled())
 	copts = addFlags(flags)
 
-	cmd.RegisterFlagCompletionFunc(
-		"env",
-		func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return os.Environ(), cobra.ShellCompDirectiveNoFileComp
-		},
-	)
-	cmd.RegisterFlagCompletionFunc(
-		"env-file",
-		func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return nil, cobra.ShellCompDirectiveDefault
-		},
-	)
-	cmd.RegisterFlagCompletionFunc(
-		"network",
-		completion.NetworkNames(dockerCli),
-	)
+	_ = cmd.RegisterFlagCompletionFunc("detach-keys", completeDetachKeys)
+	addCompletions(cmd, dockerCli)
+
+	flags.VisitAll(func(flag *pflag.Flag) {
+		// Set a default completion function if none was set. We don't look
+		// up if it does already have one set, because Cobra does this for
+		// us, and returns an error (which we ignore for this reason).
+		_ = cmd.RegisterFlagCompletionFunc(flag.Name, completion.NoComplete)
+	})
+
 	return cmd
 }
 
@@ -140,9 +133,6 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 		config.StdinOnce = false
 	}
 
-	ctx, cancelFun := context.WithCancel(ctx)
-	defer cancelFun()
-
 	containerID, err := createContainer(ctx, dockerCli, containerCfg, &runOpts.createOptions)
 	if err != nil {
 		reportError(stderr, "run", err.Error(), true)
@@ -150,9 +140,17 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 	}
 	if runOpts.sigProxy {
 		sigc := notifyAllSignals()
-		go ForwardAllSignals(ctx, apiClient, containerID, sigc)
+		// since we're explicitly setting up signal handling here, and the daemon will
+		// get notified independently of the clients ctx cancellation, we use this context
+		// but without cancellation to avoid ForwardAllSignals from returning
+		// before all signals are forwarded.
+		bgCtx := context.WithoutCancel(ctx)
+		go ForwardAllSignals(bgCtx, apiClient, containerID, sigc)
 		defer signal.StopCatch(sigc)
 	}
+
+	ctx, cancelFun := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelFun()
 
 	var (
 		waitDisplayID chan struct{}
@@ -173,6 +171,9 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 			detachKeys = runOpts.detachKeys
 		}
 
+		// ctx should not be cancellable here, as this would kill the stream to the container
+		// and we want to keep the stream open until the process in the container exits or until
+		// the user forcefully terminates the CLI.
 		closeFn, err := attachContainer(ctx, dockerCli, containerID, &errCh, config, container.AttachOptions{
 			Stream:     true,
 			Stdin:      config.AttachStdin,

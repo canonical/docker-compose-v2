@@ -26,11 +26,10 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/compose/v2/cmd/formatter"
-	"github.com/docker/compose/v2/internal/experimental"
 	xprogress "github.com/moby/buildkit/util/progress/progressui"
 	"github.com/spf13/cobra"
 
+	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/pkg/api"
 	ui "github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/compose/v2/pkg/utils"
@@ -81,13 +80,19 @@ func (opts upOptions) apply(project *types.Project, services []string) (*types.P
 	return project, nil
 }
 
-func (opts *upOptions) validateNavigationMenu(dockerCli command.Cli, experimentals *experimental.State) {
+func (opts *upOptions) validateNavigationMenu(dockerCli command.Cli) {
 	if !dockerCli.Out().IsTerminal() {
 		opts.navigationMenu = false
 		return
 	}
+	// If --menu flag was not set
 	if !opts.navigationMenuChanged {
-		opts.navigationMenu = SetUnchangedOption(ComposeMenu, experimentals.NavBar())
+		if envVar, ok := os.LookupEnv(ComposeMenu); ok {
+			opts.navigationMenu = utils.StringToBool(envVar)
+			return
+		}
+		// ...and COMPOSE_MENU env var is not defined we want the default value to be true
+		opts.navigationMenu = true
 	}
 }
 
@@ -102,7 +107,7 @@ func (opts upOptions) OnExit() api.Cascade {
 	}
 }
 
-func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service, experiments *experimental.State) *cobra.Command {
+func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
 	up := upOptions{}
 	create := createOptions{}
 	build := buildOptions{ProjectOptions: p}
@@ -127,7 +132,7 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service, ex
 				return errors.New("cannot combine --attach and --attach-dependencies")
 			}
 
-			up.validateNavigationMenu(dockerCli, experiments)
+			up.validateNavigationMenu(dockerCli)
 
 			if !p.All && len(project.Services) == 0 {
 				return fmt.Errorf("no service selected")
@@ -140,6 +145,7 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service, ex
 	flags := upCmd.Flags()
 	flags.BoolVarP(&up.Detach, "detach", "d", false, "Detached mode: Run containers in the background")
 	flags.BoolVar(&create.Build, "build", false, "Build images before starting containers")
+	flags.BoolVarP(&create.AssumeYes, "y", "y", false, `Assume "yes" as answer to all prompts and run non-interactively`)
 	flags.BoolVar(&create.noBuild, "no-build", false, "Don't build an image, even if it's policy")
 	flags.StringVar(&create.Pull, "pull", "policy", `Pull image before running ("always"|"missing"|"never")`)
 	flags.BoolVar(&create.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file")
@@ -162,7 +168,7 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service, ex
 	flags.StringArrayVar(&up.noAttach, "no-attach", []string{}, "Do not attach (stream logs) to the specified services")
 	flags.BoolVar(&up.attachDependencies, "attach-dependencies", false, "Automatically attach to log output of dependent services")
 	flags.BoolVar(&up.wait, "wait", false, "Wait for services to be running|healthy. Implies detached mode.")
-	flags.IntVar(&up.waitTimeout, "wait-timeout", 0, "Maximum duration to wait for the project to be running|healthy")
+	flags.IntVar(&up.waitTimeout, "wait-timeout", 0, "Maximum duration in seconds to wait for the project to be running|healthy")
 	flags.BoolVarP(&up.watch, "watch", "w", false, "Watch source code and rebuild/refresh containers when files are updated.")
 	flags.BoolVar(&up.navigationMenu, "menu", false, "Enable interactive shortcuts when running attached. Incompatible with --detach. Can also be enable/disable by setting COMPOSE_MENU environment var.")
 
@@ -186,8 +192,11 @@ func validateFlags(up *upOptions, create *createOptions) error {
 	if create.Build && create.noBuild {
 		return fmt.Errorf("--build and --no-build are incompatible")
 	}
-	if up.Detach && (up.attachDependencies || up.cascadeStop || up.cascadeFail || len(up.attach) > 0) {
-		return fmt.Errorf("--detach cannot be combined with --abort-on-container-exit, --abort-on-container-failure, --attach or --attach-dependencies")
+	if up.Detach && (up.attachDependencies || up.cascadeStop || up.cascadeFail || len(up.attach) > 0 || up.watch) {
+		return fmt.Errorf("--detach cannot be combined with --abort-on-container-exit, --abort-on-container-failure, --attach, --attach-dependencies or --watch")
+	}
+	if create.noInherit && create.noRecreate {
+		return fmt.Errorf("--no-recreate and --renew-anon-volumes are incompatible")
 	}
 	if create.forceRecreate && create.noRecreate {
 		return fmt.Errorf("--force-recreate and --no-recreate are incompatible")
@@ -247,6 +256,7 @@ func runUp(
 		Inherit:              !createOptions.noInherit,
 		Timeout:              createOptions.GetTimeout(),
 		QuietPull:            createOptions.quietPull,
+		AssumeYes:            createOptions.AssumeYes,
 	}
 
 	if upOptions.noStart {

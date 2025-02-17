@@ -30,6 +30,7 @@ import (
 	"github.com/docker/buildx/store/storeutil"
 	"github.com/docker/buildx/util/imagetools"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/compose/v2/internal/ocipush"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -113,6 +114,8 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 
 			err2 := g.pullComposeFiles(ctx, local, composeFile, manifest, ref, resolver)
 			if err2 != nil {
+				// we need to clean up the directory to be sure we won't let empty files present
+				_ = os.RemoveAll(local)
 				return "", err2
 			}
 		}
@@ -137,8 +140,8 @@ func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, com
 		return err
 	}
 	defer f.Close() //nolint:errcheck
-
-	if manifest.ArtifactType != "application/vnd.docker.compose.project" {
+	if (manifest.ArtifactType != "" && manifest.ArtifactType != ocipush.ComposeProjectArtifactType) ||
+		(manifest.ArtifactType == "" && manifest.Config.MediaType != ocipush.ComposeEmptyConfigMediaType) {
 		return fmt.Errorf("%s is not a compose project OCI artifact, but %s", ref.String(), manifest.ArtifactType)
 	}
 
@@ -151,16 +154,45 @@ func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, com
 		if err != nil {
 			return err
 		}
-		if i > 0 {
-			_, err = f.Write([]byte("\n---\n"))
-			if err != nil {
+
+		switch layer.MediaType {
+		case ocipush.ComposeYAMLMediaType:
+			if err := writeComposeFile(layer, i, f, content); err != nil {
 				return err
 			}
+		case ocipush.ComposeEnvFileMediaType:
+			if err := writeEnvFile(layer, local, content); err != nil {
+				return err
+			}
+		case ocipush.ComposeEmptyConfigMediaType:
 		}
-		_, err = f.Write(content)
+	}
+	return nil
+}
+
+func writeComposeFile(layer v1.Descriptor, i int, f *os.File, content []byte) error {
+	if _, ok := layer.Annotations["com.docker.compose.file"]; i > 0 && ok {
+		_, err := f.Write([]byte("\n---\n"))
 		if err != nil {
 			return err
 		}
+	}
+	_, err := f.Write(content)
+	return err
+}
+
+func writeEnvFile(layer v1.Descriptor, local string, content []byte) error {
+	envfilePath, ok := layer.Annotations["com.docker.compose.envfile"]
+	if !ok {
+		return fmt.Errorf("missing annotation com.docker.compose.envfile in layer %q", layer.Digest)
+	}
+	otherFile, err := os.Create(filepath.Join(local, envfilePath))
+	if err != nil {
+		return err
+	}
+	_, err = otherFile.Write(content)
+	if err != nil {
+		return err
 	}
 	return nil
 }

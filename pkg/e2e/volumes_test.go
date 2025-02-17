@@ -17,6 +17,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -120,4 +121,56 @@ func TestProjectVolumeBind(t *testing.T) {
 		ret := c.RunDockerOrExitError(t, "exec", "frontend", "bash", "-c", "cat /data/resultfile").Assert(t, icmd.Success)
 		assert.Assert(t, strings.Contains(ret.Stdout(), "SUCCESS"))
 	})
+}
+
+func TestUpSwitchVolumes(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-switch-volumes"
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
+		c.RunDockerCmd(t, "volume", "rm", "-f", "test_external_volume")
+		c.RunDockerCmd(t, "volume", "rm", "-f", "test_external_volume_2")
+	})
+
+	c.RunDockerCmd(t, "volume", "create", "test_external_volume")
+	c.RunDockerCmd(t, "volume", "create", "test_external_volume_2")
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/switch-volumes/compose.yaml", "--project-name", projectName, "up", "-d")
+
+	res := c.RunDockerCmd(t, "inspect", fmt.Sprintf("%s-app-1", projectName), "-f", "{{ (index .Mounts 0).Name }}")
+	res.Assert(t, icmd.Expected{Out: "test_external_volume"})
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/switch-volumes/compose2.yaml", "--project-name", projectName, "up", "-d")
+	res = c.RunDockerCmd(t, "inspect", fmt.Sprintf("%s-app-1", projectName), "-f", "{{ (index .Mounts 0).Name }}")
+	res.Assert(t, icmd.Expected{Out: "test_external_volume_2"})
+}
+
+func TestUpRecreateVolumes(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-recreate-volumes"
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
+	})
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/recreate-volumes/compose.yaml", "--project-name", projectName, "up", "-d")
+
+	res := c.RunDockerCmd(t, "volume", "inspect", fmt.Sprintf("%s_my_vol", projectName), "-f", "{{ index .Labels \"foo\" }}")
+	res.Assert(t, icmd.Expected{Out: "bar"})
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/recreate-volumes/compose2.yaml", "--project-name", projectName, "up", "-d", "-y")
+	res = c.RunDockerCmd(t, "volume", "inspect", fmt.Sprintf("%s_my_vol", projectName), "-f", "{{ index .Labels \"foo\" }}")
+	res.Assert(t, icmd.Expected{Out: "zot"})
+}
+
+func TestUpRecreateVolumes_IgnoreBinds(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-recreate-volumes"
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
+	})
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/recreate-volumes/bind.yaml", "--project-name", projectName, "up", "-d")
+
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/recreate-volumes/bind.yaml", "--project-name", projectName, "up", "-d")
+	assert.Check(t, !strings.Contains(res.Combined(), "Recreated"))
 }

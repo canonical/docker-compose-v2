@@ -83,7 +83,6 @@ func TestLocalComposeUp(t *testing.T) {
 	t.Run("check user labels", func(t *testing.T) {
 		res := c.RunDockerCmd(t, "inspect", projectName+"-web-1")
 		res.Assert(t, icmd.Expected{Out: `"my-label": "test"`})
-
 	})
 
 	t.Run("check healthcheck output", func(t *testing.T) {
@@ -165,7 +164,7 @@ func TestAttachRestart(t *testing.T) {
 func TestInitContainer(t *testing.T) {
 	c := NewParallelCLI(t)
 
-	res := c.RunDockerComposeCmd(t, "--ansi=never", "--project-directory", "./fixtures/init-container", "up")
+	res := c.RunDockerComposeCmd(t, "--ansi=never", "--project-directory", "./fixtures/init-container", "up", "--menu=false")
 	defer c.RunDockerComposeCmd(t, "-p", "init-container", "down")
 	testify.Regexp(t, "foo-1  | hello(?m:.*)bar-1  | world", res.Stdout())
 }
@@ -293,7 +292,7 @@ func TestStopWithDependenciesAttached(t *testing.T) {
 	cleanup()
 	t.Cleanup(cleanup)
 
-	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/dependencies/compose.yaml", "-p", projectName, "up", "--attach-dependencies", "foo")
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/dependencies/compose.yaml", "-p", projectName, "up", "--attach-dependencies", "foo", "--menu=false")
 	res.Assert(t, icmd.Expected{Out: "exited with code 0"})
 }
 
@@ -318,11 +317,28 @@ func TestRemoveOrphaned(t *testing.T) {
 	res.Assert(t, icmd.Expected{Out: fmt.Sprintf("%s-words-1", projectName)})
 }
 
-func TestResolveDotEnv(t *testing.T) {
+func TestComposeFileSetByDotEnv(t *testing.T) {
 	c := NewCLI(t)
+	defer c.cleanupWithDown(t, "dotenv")
 
 	cmd := c.NewDockerComposeCmd(t, "config")
 	cmd.Dir = filepath.Join(".", "fixtures", "dotenv")
+	res := icmd.RunCmd(cmd)
+	res.Assert(t, icmd.Expected{
+		ExitCode: 0,
+		Out:      "image: test:latest",
+	})
+	res.Assert(t, icmd.Expected{
+		Out: "image: enabled:profile",
+	})
+}
+
+func TestComposeFileSetByProjectDirectory(t *testing.T) {
+	c := NewCLI(t)
+	defer c.cleanupWithDown(t, "dotenv")
+
+	dir := filepath.Join(".", "fixtures", "dotenv", "development")
+	cmd := c.NewDockerComposeCmd(t, "--project-directory", dir, "config")
 	res := icmd.RunCmd(cmd)
 	res.Assert(t, icmd.Expected{
 		ExitCode: 0,
@@ -330,8 +346,33 @@ func TestResolveDotEnv(t *testing.T) {
 	})
 }
 
+func TestComposeFileSetByEnvFile(t *testing.T) {
+	c := NewCLI(t)
+	defer c.cleanupWithDown(t, "dotenv")
+
+	dotEnv, err := os.CreateTemp(t.TempDir(), ".env")
+	assert.NilError(t, err)
+	err = os.WriteFile(dotEnv.Name(), []byte(`
+COMPOSE_FILE=fixtures/dotenv/development/compose.yaml
+IMAGE_NAME=test
+IMAGE_TAG=latest
+COMPOSE_PROFILES=test
+`), 0o700)
+	assert.NilError(t, err)
+
+	cmd := c.NewDockerComposeCmd(t, "--env-file", dotEnv.Name(), "config")
+	res := icmd.RunCmd(cmd)
+	res.Assert(t, icmd.Expected{
+		Out: "image: test:latest",
+	})
+	res.Assert(t, icmd.Expected{
+		Out: "image: enabled:profile",
+	})
+}
+
 func TestNestedDotEnv(t *testing.T) {
 	c := NewCLI(t)
+	defer c.cleanupWithDown(t, "nested")
 
 	cmd := c.NewDockerComposeCmd(t, "run", "echo")
 	cmd.Dir = filepath.Join(".", "fixtures", "nested")
@@ -343,10 +384,25 @@ func TestNestedDotEnv(t *testing.T) {
 
 	cmd = c.NewDockerComposeCmd(t, "run", "echo")
 	cmd.Dir = filepath.Join(".", "fixtures", "nested", "sub")
+	defer c.cleanupWithDown(t, "nested")
 	res = icmd.RunCmd(cmd)
 	res.Assert(t, icmd.Expected{
 		ExitCode: 0,
 		Out:      "root sub win=sub",
 	})
+}
 
+func TestUnnecessaryResources(t *testing.T) {
+	const projectName = "compose-e2e-unnecessary-resources"
+	c := NewParallelCLI(t)
+	defer c.cleanupWithDown(t, projectName)
+
+	res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/external/compose.yaml", "-p", projectName, "up", "-d")
+	res.Assert(t, icmd.Expected{
+		ExitCode: 1,
+		Err:      "network foo_bar declared as external, but could not be found",
+	})
+
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/external/compose.yaml", "-p", projectName, "up", "-d", "test")
+	// Should not fail as missing external network is not used
 }

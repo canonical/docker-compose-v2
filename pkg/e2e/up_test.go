@@ -71,6 +71,7 @@ func TestUpDependenciesNotStopped(t *testing.T) {
 	testCmd := c.NewDockerComposeCmd(t,
 		"-f=./fixtures/ups-deps-stop/compose.yaml",
 		"up",
+		"--menu=false",
 		"app",
 	)
 
@@ -97,7 +98,7 @@ func TestUpDependenciesNotStopped(t *testing.T) {
 		if exitErr.ExitCode() == -1 {
 			t.Fatalf("`compose up` was killed: %v", err)
 		}
-		require.EqualValues(t, exitErr.ExitCode(), 130)
+		require.EqualValues(t, 130, exitErr.ExitCode())
 	}
 
 	RequireServiceState(t, c, "app", "exited")
@@ -151,7 +152,6 @@ func TestScaleDoesntRecreate(t *testing.T) {
 
 	res := c.RunDockerComposeCmd(t, "-f", "fixtures/simple-composefile/compose.yaml", "--project-name", projectName, "up", "--scale", "simple=2", "-d")
 	assert.Check(t, !strings.Contains(res.Combined(), "Recreated"))
-
 }
 
 func TestUpWithDependencyNotRequired(t *testing.T) {
@@ -177,4 +177,32 @@ func TestUpWithAllResources(t *testing.T) {
 	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/resources/compose.yaml", "--all-resources", "--project-name", projectName, "up")
 	assert.Assert(t, strings.Contains(res.Combined(), fmt.Sprintf(`Volume "%s_my_vol"  Created`, projectName)), res.Combined())
 	assert.Assert(t, strings.Contains(res.Combined(), fmt.Sprintf(`Network %s_my_net  Created`, projectName)), res.Combined())
+}
+
+func TestUpProfile(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-up-profile"
+	t.Cleanup(func() {
+		c.RunDockerComposeCmd(t, "--project-name", projectName, "--profile", "test", "down", "-v")
+	})
+
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/profiles/docker-compose.yaml", "--project-name", projectName, "up", "foo")
+	assert.Assert(t, strings.Contains(res.Combined(), `Container db_c  Created`), res.Combined())
+	assert.Assert(t, strings.Contains(res.Combined(), `Container foo_c  Created`), res.Combined())
+	assert.Assert(t, !strings.Contains(res.Combined(), `Container bar_c  Created`), res.Combined())
+}
+
+func TestUpImageID(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-up-image-id"
+
+	digest := strings.TrimSpace(c.RunDockerCmd(t, "image", "inspect", "alpine", "-f", "{{ .ID }}").Stdout())
+	_, id, _ := strings.Cut(digest, ":")
+
+	t.Cleanup(func() {
+		c.RunDockerComposeCmd(t, "--project-name", projectName, "down", "-v")
+	})
+
+	c = NewCLI(t, WithEnv(fmt.Sprintf("ID=%s", id)))
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/simple-composefile/id.yaml", "--project-name", projectName, "up")
 }

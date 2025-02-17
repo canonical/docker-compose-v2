@@ -7,7 +7,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
@@ -77,6 +77,16 @@ func NewCreateCommand(dockerCli command.Cli) *cobra.Command {
 	command.AddPlatformFlag(flags, &options.platform)
 	command.AddTrustVerificationFlags(flags, &options.untrusted, dockerCli.ContentTrustEnabled())
 	copts = addFlags(flags)
+
+	addCompletions(cmd, dockerCli)
+
+	flags.VisitAll(func(flag *pflag.Flag) {
+		// Set a default completion function if none was set. We don't look
+		// up if it does already have one set, because Cobra does this for
+		// us, and returns an error (which we ignore for this reason).
+		_ = cmd.RegisterFlagCompletionFunc(flag.Name, completion.NoComplete)
+	})
+
 	return cmd
 }
 
@@ -130,9 +140,9 @@ func pullImage(ctx context.Context, dockerCli command.Cli, img string, options *
 
 	out := dockerCli.Err()
 	if options.quiet {
-		out = io.Discard
+		out = streams.NewOut(io.Discard)
 	}
-	return jsonmessage.DisplayJSONMessagesToStream(responseBody, streams.NewOut(out), nil)
+	return jsonmessage.DisplayJSONMessagesToStream(responseBody, out, nil)
 }
 
 type cidFile struct {
@@ -239,7 +249,7 @@ func createContainer(ctx context.Context, dockerCli command.Cli, containerCfg *c
 	if options.platform != "" && versions.GreaterThanOrEqualTo(dockerCli.Client().ClientVersion(), "1.41") {
 		p, err := platforms.Parse(options.platform)
 		if err != nil {
-			return "", errors.Wrap(err, "error parsing specified platform")
+			return "", errors.Wrap(errdefs.InvalidParameter(err), "error parsing specified platform")
 		}
 		platform = &p
 	}

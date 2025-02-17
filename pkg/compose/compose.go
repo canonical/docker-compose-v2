@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/docker/compose/v2/internal/desktop"
 	"github.com/docker/compose/v2/internal/experimental"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/jonboulle/clockwork"
 
@@ -128,11 +128,11 @@ func (s *composeService) stdin() *streams.In {
 	return s.dockerCli.In()
 }
 
-func (s *composeService) stderr() io.Writer {
+func (s *composeService) stderr() *streams.Out {
 	return s.dockerCli.Err()
 }
 
-func (s *composeService) stdinfo() io.Writer {
+func (s *composeService) stdinfo() *streams.Out {
 	if stdioToStdout {
 		return s.dockerCli.Out()
 	}
@@ -176,7 +176,10 @@ func (s *composeService) projectFromName(containers Containers, projectName stri
 	}
 	set := types.Services{}
 	for _, c := range containers {
-		serviceLabel := c.Labels[api.ServiceLabel]
+		serviceLabel, ok := c.Labels[api.ServiceLabel]
+		if !ok {
+			serviceLabel = getCanonicalContainerName(c)
+		}
 		service, ok := set[serviceLabel]
 		if !ok {
 			service = types.ServiceConfig{
@@ -184,14 +187,13 @@ func (s *composeService) projectFromName(containers Containers, projectName stri
 				Image:  c.Image,
 				Labels: c.Labels,
 			}
-
 		}
 		service.Scale = increment(service.Scale)
 		set[serviceLabel] = service
 	}
 	for name, service := range set {
 		dependencies := service.Labels[api.DependenciesLabel]
-		if len(dependencies) > 0 {
+		if dependencies != "" {
 			service.DependsOn = types.DependsOnConfig{}
 			for _, dc := range strings.Split(dependencies, ",") {
 				dcArr := strings.Split(dc, ":")
@@ -261,7 +263,7 @@ func (s *composeService) actualVolumes(ctx context.Context, projectName string) 
 }
 
 func (s *composeService) actualNetworks(ctx context.Context, projectName string) (types.Networks, error) {
-	networks, err := s.apiClient().NetworkList(ctx, moby.NetworkListOptions{
+	networks, err := s.apiClient().NetworkList(ctx, network.ListOptions{
 		Filters: filters.NewArgs(projectFilter(projectName)),
 	})
 	if err != nil {
@@ -318,16 +320,8 @@ func (s *composeService) RuntimeVersion(ctx context.Context) (string, error) {
 		runtimeVersion.val = version.APIVersion
 	})
 	return runtimeVersion.val, runtimeVersion.err
-
 }
 
 func (s *composeService) isDesktopIntegrationActive() bool {
 	return s.desktopCli != nil
-}
-
-func (s *composeService) isDesktopUIEnabled() bool {
-	if !s.isDesktopIntegrationActive() {
-		return false
-	}
-	return s.experiments.ComposeUI()
 }

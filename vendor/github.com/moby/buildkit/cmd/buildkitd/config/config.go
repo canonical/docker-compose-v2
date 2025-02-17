@@ -33,6 +33,19 @@ type Config struct {
 	DNS *DNSConfig `toml:"dns"`
 
 	History *HistoryConfig `toml:"history"`
+
+	Frontends struct {
+		Dockerfile DockerfileFrontendConfig `toml:"dockerfile.v0"`
+		Gateway    GatewayFrontendConfig    `toml:"gateway.v0"`
+	} `toml:"frontend"`
+
+	System *SystemConfig `toml:"system"`
+}
+
+type SystemConfig struct {
+	// PlatformCacheMaxAge controls how often supported platforms
+	// are refreshed by rescanning the system.
+	PlatformsCacheMaxAge *Duration `toml:"platformsCacheMaxAge"`
 }
 
 type LogConfig struct {
@@ -62,9 +75,13 @@ type OTELConfig struct {
 }
 
 type GCConfig struct {
-	GC            *bool      `toml:"gc"`
-	GCKeepStorage DiskSpace  `toml:"gckeepstorage"`
-	GCPolicy      []GCPolicy `toml:"gcpolicy"`
+	GC *bool `toml:"gc"`
+	// Deprecated: use GCReservedSpace instead
+	GCKeepStorage   DiskSpace  `toml:"gckeepstorage"`
+	GCReservedSpace DiskSpace  `toml:"reservedSpace"`
+	GCMaxUsedSpace  DiskSpace  `toml:"maxUsedSpace"`
+	GCMinFreeSpace  DiskSpace  `toml:"minFreeSpace"`
+	GCPolicy        []GCPolicy `toml:"gcpolicy"`
 }
 
 type NetworkConfig struct {
@@ -129,6 +146,8 @@ type ContainerdConfig struct {
 
 	MaxParallelism int `toml:"max-parallelism"`
 
+	DefaultCgroupParent string `toml:"defaultCgroupParent"`
+
 	Rootless bool `toml:"rootless"`
 }
 
@@ -139,10 +158,29 @@ type ContainerdRuntime struct {
 }
 
 type GCPolicy struct {
-	All          bool      `toml:"all"`
-	KeepBytes    DiskSpace `toml:"keepBytes"`
-	KeepDuration Duration  `toml:"keepDuration"`
-	Filters      []string  `toml:"filters"`
+	All     bool     `toml:"all"`
+	Filters []string `toml:"filters"`
+
+	KeepDuration Duration `toml:"keepDuration"`
+
+	// KeepBytes is the maximum amount of storage this policy is ever allowed
+	// to consume. Any storage above this mark can be cleared during a gc
+	// sweep.
+	//
+	// Deprecated: use ReservedSpace instead
+	KeepBytes DiskSpace `toml:"keepBytes"`
+
+	// ReservedSpace is the minimum amount of disk space this policy is guaranteed to retain.
+	// Any usage below this threshold will not be reclaimed during garbage collection.
+	ReservedSpace DiskSpace `toml:"reservedSpace"`
+
+	// MaxUsedSpace is the maximum amount of disk space this policy is allowed to use.
+	// Any usage exceeding this limit will be cleaned up during a garbage collection sweep.
+	MaxUsedSpace DiskSpace `toml:"maxUsedSpace"`
+
+	// MinFreeSpace is the target amount of free disk space the garbage collector will attempt to leave.
+	// However, it will never let the available space fall below ReservedSpace.
+	MinFreeSpace DiskSpace `toml:"minFreeSpace"`
 }
 
 type DNSConfig struct {
@@ -154,4 +192,13 @@ type DNSConfig struct {
 type HistoryConfig struct {
 	MaxAge     Duration `toml:"maxAge"`
 	MaxEntries int64    `toml:"maxEntries"`
+}
+
+type DockerfileFrontendConfig struct {
+	Enabled *bool `toml:"enabled"`
+}
+
+type GatewayFrontendConfig struct {
+	Enabled             *bool    `toml:"enabled"`
+	AllowedRepositories []string `toml:"allowedRepositories"`
 }

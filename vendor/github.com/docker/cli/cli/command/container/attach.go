@@ -2,7 +2,6 @@ package container
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/docker/cli/cli"
@@ -74,7 +73,8 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 	apiClient := dockerCLI.Client()
 
 	// request channel to wait for client
-	resultC, errC := apiClient.ContainerWait(ctx, containerID, "")
+	waitCtx := context.WithoutCancel(ctx)
+	resultC, errC := apiClient.ContainerWait(waitCtx, containerID, "")
 
 	c, err := inspectContainerAndCheckState(ctx, apiClient, containerID)
 	if err != nil {
@@ -105,7 +105,12 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 
 	if opts.Proxy && !c.Config.Tty {
 		sigc := notifyAllSignals()
-		go ForwardAllSignals(ctx, apiClient, containerID, sigc)
+		// since we're explicitly setting up signal handling here, and the daemon will
+		// get notified independently of the clients ctx cancellation, we use this context
+		// but without cancellation to avoid ForwardAllSignals from returning
+		// before all signals are forwarded.
+		bgCtx := context.WithoutCancel(ctx)
+		go ForwardAllSignals(bgCtx, apiClient, containerID, sigc)
 		defer signal.StopCatch(sigc)
 	}
 
@@ -142,7 +147,8 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 		detachKeys:   options.DetachKeys,
 	}
 
-	if err := streamer.stream(ctx); err != nil {
+	// if the context was canceled, this was likely intentional and we shouldn't return an error
+	if err := streamer.stream(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 
@@ -153,12 +159,15 @@ func getExitStatus(errC <-chan error, resultC <-chan container.WaitResponse) err
 	select {
 	case result := <-resultC:
 		if result.Error != nil {
-			return fmt.Errorf(result.Error.Message)
+			return errors.New(result.Error.Message)
 		}
 		if result.StatusCode != 0 {
 			return cli.StatusError{StatusCode: int(result.StatusCode)}
 		}
 	case err := <-errC:
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 

@@ -56,13 +56,16 @@ func (s *composeService) restart(ctx context.Context, projectName string, option
 	}
 
 	// ignore depends_on relations which are not impacted by restarting service or not required
-	for i, service := range project.Services {
-		for name, r := range service.DependsOn {
+	project, err = project.WithServicesTransform(func(name string, s types.ServiceConfig) (types.ServiceConfig, error) {
+		for name, r := range s.DependsOn {
 			if !r.Restart {
-				delete(service.DependsOn, name)
+				delete(s.DependsOn, name)
 			}
 		}
-		project.Services[i] = service
+		return s, nil
+	})
+	if err != nil {
+		return err
 	}
 
 	if len(options.Services) != 0 {
@@ -75,17 +78,17 @@ func (s *composeService) restart(ctx context.Context, projectName string, option
 	w := progress.ContextWriter(ctx)
 	return InDependencyOrder(ctx, project, func(c context.Context, service string) error {
 		eg, ctx := errgroup.WithContext(ctx)
-		for _, container := range containers.filter(isService(service)) {
-			container := container
+		for _, ctr := range containers.filter(isService(service)) {
 			eg.Go(func() error {
-				eventName := getContainerProgressName(container)
+				eventName := getContainerProgressName(ctr)
 				w.Event(progress.RestartingEvent(eventName))
 				timeout := utils.DurationSecondToInt(options.Timeout)
-				err := s.apiClient().ContainerRestart(ctx, container.ID, containerType.StopOptions{Timeout: timeout})
-				if err == nil {
-					w.Event(progress.StartedEvent(eventName))
+				err := s.apiClient().ContainerRestart(ctx, ctr.ID, containerType.StopOptions{Timeout: timeout})
+				if err != nil {
+					return err
 				}
-				return err
+				w.Event(progress.StartedEvent(eventName))
+				return nil
 			})
 		}
 		return eg.Wait()

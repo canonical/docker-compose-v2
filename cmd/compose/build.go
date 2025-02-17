@@ -48,7 +48,6 @@ type buildOptions struct {
 
 func (opts buildOptions) toAPIBuildOptions(services []string) (api.BuildOptions, error) {
 	var SSHKeys []types.SSHKey
-	var err error
 	if opts.ssh != "" {
 		id, path, found := strings.Cut(opts.ssh, "=")
 		if !found && id != "default" {
@@ -58,19 +57,20 @@ func (opts buildOptions) toAPIBuildOptions(services []string) (api.BuildOptions,
 			ID:   id,
 			Path: path,
 		})
-		if err != nil {
-			return api.BuildOptions{}, err
-		}
 	}
 	builderName := opts.builder
 	if builderName == "" {
 		builderName = os.Getenv("BUILDX_BUILDER")
 	}
 
+	uiMode := ui.Mode
+	if uiMode == ui.ModeJSON {
+		uiMode = "rawjson"
+	}
 	return api.BuildOptions{
 		Pull:     opts.pull,
 		Push:     opts.push,
-		Progress: ui.Mode,
+		Progress: uiMode,
 		Args:     types.NewMappingWithEquals(opts.args),
 		NoCache:  opts.noCache,
 		Quiet:    opts.quiet,

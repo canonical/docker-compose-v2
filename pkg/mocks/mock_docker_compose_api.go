@@ -69,6 +69,20 @@ func (mr *MockServiceMockRecorder) Build(ctx, project, options any) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Build", reflect.TypeOf((*MockService)(nil).Build), ctx, project, options)
 }
 
+// Commit mocks base method.
+func (m *MockService) Commit(ctx context.Context, projectName string, options api.CommitOptions) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Commit", ctx, projectName, options)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Commit indicates an expected call of Commit.
+func (mr *MockServiceMockRecorder) Commit(ctx, projectName, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Commit", reflect.TypeOf((*MockService)(nil).Commit), ctx, projectName, options)
+}
+
 // Copy mocks base method.
 func (m *MockService) Copy(ctx context.Context, projectName string, options api.CopyOptions) error {
 	m.ctrl.T.Helper()
@@ -153,6 +167,35 @@ func (m *MockService) Exec(ctx context.Context, projectName string, options api.
 func (mr *MockServiceMockRecorder) Exec(ctx, projectName, options any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Exec", reflect.TypeOf((*MockService)(nil).Exec), ctx, projectName, options)
+}
+
+// Export mocks base method.
+func (m *MockService) Export(ctx context.Context, projectName string, options api.ExportOptions) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Export", ctx, projectName, options)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Export indicates an expected call of Export.
+func (mr *MockServiceMockRecorder) Export(ctx, projectName, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Export", reflect.TypeOf((*MockService)(nil).Export), ctx, projectName, options)
+}
+
+// Generate mocks base method.
+func (m *MockService) Generate(ctx context.Context, options api.GenerateOptions) (*types.Project, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Generate", ctx, options)
+	ret0, _ := ret[0].(*types.Project)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Generate indicates an expected call of Generate.
+func (mr *MockServiceMockRecorder) Generate(ctx, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Generate", reflect.TypeOf((*MockService)(nil).Generate), ctx, options)
 }
 
 // Images mocks base method.
