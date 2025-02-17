@@ -1,3 +1,14 @@
+docker-compose-v2 (2.33.0+ds1-0ubuntu1) plucky; urgency=medium
+
+  * New upstream version 2.33.0+ds1
+  * d/control: build with golang 1.24 (LP: #2098663)
+  * d/rules: add golang 1.24 to PATH
+  * d/docker-compose-v2.docs: update NOTICE file list
+  * d/s/lintian-overrides: remove unused override
+  * d/copyright: update copyright data
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Mon, 17 Feb 2025 17:16:24 -0300
+
 docker-compose-v2 (2.27.1+ds1-0ubuntu1) oracular; urgency=medium
 
   * New upstream release.
