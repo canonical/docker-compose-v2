@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
@@ -28,8 +27,11 @@ type APIClientProvider interface {
 }
 
 // ImageNames offers completion for images present within the local store
-func ImageNames(dockerCLI APIClientProvider) ValidArgsFn {
+func ImageNames(dockerCLI APIClientProvider, limit int) ValidArgsFn {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if limit > 0 && len(args) >= limit {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
 		list, err := dockerCLI.Client().ImageList(cmd.Context(), image.ListOptions{})
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
@@ -45,7 +47,7 @@ func ImageNames(dockerCLI APIClientProvider) ValidArgsFn {
 // ContainerNames offers completion for container names and IDs
 // By default, only names are returned.
 // Set DOCKER_COMPLETION_SHOW_CONTAINER_IDS=yes to also complete IDs.
-func ContainerNames(dockerCLI APIClientProvider, all bool, filters ...func(types.Container) bool) ValidArgsFn {
+func ContainerNames(dockerCLI APIClientProvider, all bool, filters ...func(container.Summary) bool) ValidArgsFn {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		list, err := dockerCLI.Client().ContainerList(cmd.Context(), container.ListOptions{
 			All: all,

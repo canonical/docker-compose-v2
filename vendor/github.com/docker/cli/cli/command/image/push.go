@@ -8,18 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
+	"github.com/docker/cli/cli/internal/jsonstream"
 	"github.com/docker/cli/cli/streams"
+	"github.com/docker/cli/internal/tui"
 	"github.com/docker/docker/api/types/auxprogress"
 	"github.com/docker/docker/api/types/image"
 	registrytypes "github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/registry"
 	"github.com/morikuni/aec"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -51,7 +51,7 @@ func NewPushCommand(dockerCli command.Cli) *cobra.Command {
 			"category-top": "6",
 			"aliases":      "docker image push, docker push",
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli),
+		ValidArgsFunction: completion.ImageNames(dockerCli, 1),
 	}
 
 	flags := cmd.Flags()
@@ -78,6 +78,7 @@ Image index won't be pushed, meaning that other manifests, including attestation
 //nolint:gocyclo
 func RunPush(ctx context.Context, dockerCli command.Cli, opts pushOptions) error {
 	var platform *ocispec.Platform
+	out := tui.NewOutput(dockerCli.Out())
 	if opts.platform != "" {
 		p, err := platforms.Parse(opts.platform)
 		if err != nil {
@@ -86,7 +87,7 @@ func RunPush(ctx context.Context, dockerCli command.Cli, opts pushOptions) error
 		}
 		platform = &p
 
-		printNote(dockerCli, `Using --platform pushes only the specified platform manifest of a multi-platform image index.
+		out.PrintNote(`Using --platform pushes only the specified platform manifest of a multi-platform image index.
 Other components, like attestations, will not be included.
 To push the complete multi-platform image, remove the --platform flag.
 `)
@@ -101,7 +102,7 @@ To push the complete multi-platform image, remove the --platform flag.
 	case !opts.all && reference.IsNameOnly(ref):
 		ref = reference.TagNameOnly(ref)
 		if tagged, ok := ref.(reference.Tagged); ok && !opts.quiet {
-			_, _ = fmt.Fprintf(dockerCli.Out(), "Using default tag: %s\n", tagged.Tag())
+			_, _ = fmt.Fprintln(dockerCli.Out(), "Using default tag:", tagged.Tag())
 		}
 	}
 
@@ -132,31 +133,30 @@ To push the complete multi-platform image, remove the --platform flag.
 
 	defer func() {
 		for _, note := range notes {
-			fmt.Fprintln(dockerCli.Err(), "")
-			printNote(dockerCli, note)
+			out.PrintNote(note)
 		}
 	}()
 
 	defer responseBody.Close()
 	if !opts.untrusted {
 		// TODO PushTrustedReference currently doesn't respect `--quiet`
-		return PushTrustedReference(dockerCli, repoInfo, ref, authConfig, responseBody)
+		return PushTrustedReference(ctx, dockerCli, repoInfo, ref, authConfig, responseBody)
 	}
 
 	if opts.quiet {
-		err = jsonmessage.DisplayJSONMessagesToStream(responseBody, streams.NewOut(io.Discard), handleAux(dockerCli))
+		err = jsonstream.Display(ctx, responseBody, streams.NewOut(io.Discard), jsonstream.WithAuxCallback(handleAux()))
 		if err == nil {
 			fmt.Fprintln(dockerCli.Out(), ref.String())
 		}
 		return err
 	}
-	return jsonmessage.DisplayJSONMessagesToStream(responseBody, dockerCli.Out(), handleAux(dockerCli))
+	return jsonstream.Display(ctx, responseBody, dockerCli.Out(), jsonstream.WithAuxCallback(handleAux()))
 }
 
 var notes []string
 
-func handleAux(dockerCli command.Cli) func(jm jsonmessage.JSONMessage) {
-	return func(jm jsonmessage.JSONMessage) {
+func handleAux() func(jm jsonstream.JSONMessage) {
+	return func(jm jsonstream.JSONMessage) {
 		b := []byte(*jm.Aux)
 
 		var stripped auxprogress.ManifestPushedInsteadOfIndex
@@ -181,27 +181,5 @@ func handleAux(dockerCli command.Cli) func(jm jsonmessage.JSONMessage) {
 				You can also push only a single platform specific manifest directly by specifying the platform you want to push with the --platform flag.`
 			notes = append(notes, note)
 		}
-	}
-}
-
-func printNote(dockerCli command.Cli, format string, args ...any) {
-	if dockerCli.Err().IsTerminal() {
-		format = strings.ReplaceAll(format, "--platform", aec.Bold.Apply("--platform"))
-	}
-
-	header := " Info -> "
-	padding := len(header)
-	if dockerCli.Err().IsTerminal() {
-		padding = len("i Info > ")
-		header = aec.Bold.Apply(aec.LightCyanB.Apply(aec.BlackF.Apply("i")) + " " + aec.LightCyanF.Apply("Info → "))
-	}
-
-	_, _ = fmt.Fprint(dockerCli.Err(), header)
-	s := fmt.Sprintf(format, args...)
-	for idx, line := range strings.Split(s, "\n") {
-		if idx > 0 {
-			_, _ = fmt.Fprint(dockerCli.Err(), strings.Repeat(" ", padding))
-		}
-		_, _ = fmt.Fprintln(dockerCli.Err(), aec.Italic.Apply(line))
 	}
 }

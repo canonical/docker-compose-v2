@@ -23,6 +23,8 @@ type Config struct {
 
 	OTEL OTELConfig `toml:"otel"`
 
+	CDI CDIConfig `toml:"cdi"`
+
 	Workers struct {
 		OCI        OCIConfig        `toml:"oci"`
 		Containerd ContainerdConfig `toml:"containerd"`
@@ -72,6 +74,12 @@ type TLSConfig struct {
 
 type OTELConfig struct {
 	SocketPath string `toml:"socketPath"`
+}
+
+type CDIConfig struct {
+	Disabled    *bool    `toml:"disabled"`
+	SpecDirs    []string `toml:"specDirs"`
+	AutoAllowed []string `toml:"autoAllowed"`
 }
 
 type GCConfig struct {
