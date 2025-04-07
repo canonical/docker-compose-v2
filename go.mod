@@ -1,6 +1,7 @@
 module github.com/docker/compose/v2
 
 go 1.22.10
+toolchain go1.24.1
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
@@ -52,7 +53,7 @@ require (
 	go.uber.org/goleak v1.3.0
 	go.uber.org/mock v0.5.0
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
-	golang.org/x/sync v0.11.0
+	golang.org/x/sync v0.13.0
 	golang.org/x/sys v0.30.0
 	google.golang.org/grpc v1.68.1
 	gopkg.in/yaml.v3 v3.0.1
