@@ -1,6 +1,10 @@
 docker-compose-v2 (2.37.1+ds1-0ubuntu2) questing; urgency=medium
 
+  [ Renan Rodrigo ]
   * d/control: Provide docker-compose
+
+  [ Athos Ribeiro ]
+  * d/control: demote docker.io to recommends (LP: #2079929)
 
  -- Renan Rodrigo <renanrodrigo@canonical.com>  Thu, 14 Aug 2025 09:27:38 -0300
 
