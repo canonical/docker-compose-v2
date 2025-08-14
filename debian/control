@@ -15,6 +15,7 @@ Architecture: any
 Depends: docker.io,
          ${misc:Depends},
          ${shlibs:Depends}
+Provides: docker-compose
 Built-Using: ${libc:Built-Using}, ${misc:Built-Using}
 Description: tool for running multi-container applications on Docker
  Docker Compose is a tool for running multi-container applications on Docker
