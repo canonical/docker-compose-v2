@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/distribution/reference"
@@ -153,7 +155,7 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 	return multierror.Append(nil, pullErrors...).ErrorOrNil()
 }
 
-func imageAlreadyPresent(serviceImage string, localImages map[string]string) bool {
+func imageAlreadyPresent(serviceImage string, localImages map[string]api.ImageSummary) bool {
 	normalizedImage, err := reference.ParseDockerRef(serviceImage)
 	if err != nil {
 		return false
@@ -202,6 +204,15 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 		Platform:     platform,
 	})
 
+	if ctx.Err() != nil {
+		w.Event(progress.Event{
+			ID:         service.Name,
+			Status:     progress.Warning,
+			StatusText: "Interrupted",
+		})
+		return "", nil
+	}
+
 	// check if has error and the service has a build section
 	// then the status should be warning instead of error
 	if err != nil && service.Build != nil {
@@ -246,7 +257,7 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 		Text:   "Pulled",
 	})
 
-	inspected, _, err := s.apiClient().ImageInspectWithRaw(ctx, service.Image)
+	inspected, err := s.apiClient().ImageInspect(ctx, service.Image)
 	if err != nil {
 		return "", err
 	}
@@ -288,23 +299,29 @@ func encodedAuth(ref reference.Named, configFile driver.Auth) (string, error) {
 	return base64.URLEncoding.EncodeToString(buf), nil
 }
 
-func (s *composeService) pullRequiredImages(ctx context.Context, project *types.Project, images map[string]string, quietPull bool) error {
-	var needPull []types.ServiceConfig
-	for _, service := range project.Services {
-		if service.Image == "" {
-			continue
+func (s *composeService) pullRequiredImages(ctx context.Context, project *types.Project, images map[string]api.ImageSummary, quietPull bool) error {
+	needPull := map[string]types.ServiceConfig{}
+	for name, service := range project.Services {
+		pull, err := mustPull(service, images)
+		if err != nil {
+			return err
 		}
-		switch service.PullPolicy {
-		case "", types.PullPolicyMissing, types.PullPolicyIfNotPresent:
-			if _, ok := images[service.Image]; ok {
-				continue
+		if pull {
+			needPull[name] = service
+		}
+		for i, vol := range service.Volumes {
+			if vol.Type == types.VolumeTypeImage {
+				if _, ok := images[vol.Source]; !ok {
+					// Hack: create a fake ServiceConfig so we pull missing volume image
+					n := fmt.Sprintf("%s:volume %d", name, i)
+					needPull[n] = types.ServiceConfig{
+						Name:  n,
+						Image: vol.Source,
+					}
+				}
 			}
-		case types.PullPolicyNever, types.PullPolicyBuild:
-			continue
-		case types.PullPolicyAlways:
-			// force pull
 		}
-		needPull = append(needPull, service)
+
 	}
 	if len(needPull) == 0 {
 		return nil
@@ -314,11 +331,18 @@ func (s *composeService) pullRequiredImages(ctx context.Context, project *types.
 		w := progress.ContextWriter(ctx)
 		eg, ctx := errgroup.WithContext(ctx)
 		eg.SetLimit(s.maxConcurrency)
-		pulledImages := make([]string, len(needPull))
-		for i, service := range needPull {
+		pulledImages := map[string]api.ImageSummary{}
+		var mutex sync.Mutex
+		for name, service := range needPull {
 			eg.Go(func() error {
 				id, err := s.pullServiceImage(ctx, service, s.configFile(), w, quietPull, project.Environment["DOCKER_DEFAULT_PLATFORM"])
-				pulledImages[i] = id
+				mutex.Lock()
+				defer mutex.Unlock()
+				pulledImages[name] = api.ImageSummary{
+					ID:          id,
+					Repository:  service.Image,
+					LastTagTime: time.Now(),
+				}
 				if err != nil && isServiceImageToBuild(service, project.Services) {
 					// image can be built, so we can ignore pull failure
 					return nil
@@ -328,12 +352,41 @@ func (s *composeService) pullRequiredImages(ctx context.Context, project *types.
 		}
 		err := eg.Wait()
 		for i, service := range needPull {
-			if pulledImages[i] != "" {
+			if pulledImages[i].ID != "" {
 				images[service.Image] = pulledImages[i]
 			}
 		}
 		return err
 	}, s.stdinfo())
+}
+
+func mustPull(service types.ServiceConfig, images map[string]api.ImageSummary) (bool, error) {
+	if service.Provider != nil {
+		return false, nil
+	}
+	if service.Image == "" {
+		return false, nil
+	}
+	policy, duration, err := service.GetPullPolicy()
+	if err != nil {
+		return false, err
+	}
+	switch policy {
+	case types.PullPolicyAlways:
+		// force pull
+		return true, nil
+	case types.PullPolicyNever, types.PullPolicyBuild:
+		return false, nil
+	case types.PullPolicyRefresh:
+		img, ok := images[service.Image]
+		if !ok {
+			return true, nil
+		}
+		return time.Now().After(img.LastTagTime.Add(duration)), nil
+	default: // Pull if missing
+		_, ok := images[service.Image]
+		return !ok, nil
+	}
 }
 
 func isServiceImageToBuild(service types.ServiceConfig, services types.Services) bool {

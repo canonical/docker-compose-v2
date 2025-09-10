@@ -90,7 +90,7 @@ func (a *Attest) ToPB() *controllerapi.Attest {
 }
 
 func (a *Attest) MarshalJSON() ([]byte, error) {
-	m := make(map[string]interface{}, len(a.Attrs)+2)
+	m := make(map[string]any, len(a.Attrs)+2)
 	for k, v := range a.Attrs {
 		m[k] = v
 	}
@@ -102,7 +102,7 @@ func (a *Attest) MarshalJSON() ([]byte, error) {
 }
 
 func (a *Attest) UnmarshalJSON(data []byte) error {
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
@@ -148,9 +148,8 @@ func (a *Attest) UnmarshalText(text []byte) error {
 		if !ok {
 			return errors.Errorf("invalid value %s", field)
 		}
-		key = strings.TrimSpace(strings.ToLower(key))
 
-		switch key {
+		switch strings.TrimSpace(strings.ToLower(key)) {
 		case "type":
 			a.Type = value
 		case "disabled":
@@ -203,7 +202,7 @@ func ParseAttests(in []string) ([]*controllerapi.Attest, error) {
 func ConvertAttests(in []*Attest) ([]*controllerapi.Attest, error) {
 	out := make([]*controllerapi.Attest, 0, len(in))
 
-	// Check for dupplicate attestations while we convert them
+	// Check for duplicate attestations while we convert them
 	// to the controller API.
 	found := map[string]struct{}{}
 	for _, attest := range in {

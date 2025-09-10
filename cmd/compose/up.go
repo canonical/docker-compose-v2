@@ -27,7 +27,9 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	xprogress "github.com/moby/buildkit/util/progress/progressui"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/pkg/api"
@@ -145,7 +147,6 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *c
 	flags := upCmd.Flags()
 	flags.BoolVarP(&up.Detach, "detach", "d", false, "Detached mode: Run containers in the background")
 	flags.BoolVar(&create.Build, "build", false, "Build images before starting containers")
-	flags.BoolVarP(&create.AssumeYes, "y", "y", false, `Assume "yes" as answer to all prompts and run non-interactively`)
 	flags.BoolVar(&create.noBuild, "no-build", false, "Don't build an image, even if it's policy")
 	flags.StringVar(&create.Pull, "pull", "policy", `Pull image before running ("always"|"missing"|"never")`)
 	flags.BoolVar(&create.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file")
@@ -171,7 +172,15 @@ func upCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *c
 	flags.IntVar(&up.waitTimeout, "wait-timeout", 0, "Maximum duration in seconds to wait for the project to be running|healthy")
 	flags.BoolVarP(&up.watch, "watch", "w", false, "Watch source code and rebuild/refresh containers when files are updated.")
 	flags.BoolVar(&up.navigationMenu, "menu", false, "Enable interactive shortcuts when running attached. Incompatible with --detach. Can also be enable/disable by setting COMPOSE_MENU environment var.")
-
+	flags.BoolVarP(&create.AssumeYes, "yes", "y", false, `Assume "yes" as answer to all prompts and run non-interactively`)
+	flags.SetNormalizeFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
+		// assumeYes was introduced by mistake as `--y`
+		if name == "y" {
+			logrus.Warn("--y is deprecated, please use --yes instead")
+			name = "yes"
+		}
+		return pflag.NormalizedName(name)
+	})
 	return upCmd
 }
 
@@ -193,7 +202,11 @@ func validateFlags(up *upOptions, create *createOptions) error {
 		return fmt.Errorf("--build and --no-build are incompatible")
 	}
 	if up.Detach && (up.attachDependencies || up.cascadeStop || up.cascadeFail || len(up.attach) > 0 || up.watch) {
-		return fmt.Errorf("--detach cannot be combined with --abort-on-container-exit, --abort-on-container-failure, --attach, --attach-dependencies or --watch")
+		if up.wait {
+			return fmt.Errorf("--wait cannot be combined with --abort-on-container-exit, --abort-on-container-failure, --attach, --attach-dependencies or --watch")
+		} else {
+			return fmt.Errorf("--detach cannot be combined with --abort-on-container-exit, --abort-on-container-failure, --attach, --attach-dependencies or --watch")
+		}
 	}
 	if create.noInherit && create.noRecreate {
 		return fmt.Errorf("--no-recreate and --renew-anon-volumes are incompatible")
@@ -220,6 +233,10 @@ func runUp(
 	project *types.Project,
 	services []string,
 ) error {
+	if err := checksForRemoteStack(ctx, dockerCli, project, buildOptions, createOptions.AssumeYes, []string{}); err != nil {
+		return err
+	}
+
 	err := createOptions.Apply(project)
 	if err != nil {
 		return err
@@ -243,6 +260,8 @@ func runUp(
 		if err != nil {
 			return err
 		}
+		bo.Services = services
+		bo.Deps = !upOptions.noDeps
 		build = &bo
 	}
 

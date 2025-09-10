@@ -19,8 +19,10 @@ package compose
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/compose-spec/compose-go/v2/format"
 	xprogress "github.com/moby/buildkit/util/progress/progressui"
 	"github.com/sirupsen/logrus"
@@ -44,6 +46,7 @@ type runOptions struct {
 	Service       string
 	Command       []string
 	environment   []string
+	envFiles      []string
 	Detach        bool
 	Remove        bool
 	noTty         bool
@@ -64,6 +67,7 @@ type runOptions struct {
 	noDeps        bool
 	ignoreOrphans bool
 	removeOrphans bool
+	quiet         bool
 	quietPull     bool
 }
 
@@ -116,6 +120,29 @@ func (options runOptions) apply(project *types.Project) (*types.Project, error) 
 	return project, nil
 }
 
+func (options runOptions) getEnvironment() (types.Mapping, error) {
+	environment := types.NewMappingWithEquals(options.environment).Resolve(os.LookupEnv).ToMapping()
+	for _, file := range options.envFiles {
+		f, err := os.Open(file)
+		if err != nil {
+			return nil, err
+		}
+		vars, err := dotenv.ParseWithLookup(f, func(k string) (string, bool) {
+			value, ok := environment[k]
+			return value, ok
+		})
+		if err != nil {
+			return nil, nil
+		}
+		for k, v := range vars {
+			if _, ok := environment[k]; !ok {
+				environment[k] = v
+			}
+		}
+	}
+	return environment, nil
+}
+
 func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
 	options := runOptions{
 		composeOptions: &composeOptions{
@@ -154,11 +181,24 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 					options.noTty = !options.tty
 				}
 			}
+			if options.quiet {
+				progress.Mode = progress.ModeQuiet
+				devnull, err := os.Open(os.DevNull)
+				if err != nil {
+					return err
+				}
+				os.Stdout = devnull
+			}
 			createOpts.pullChanged = cmd.Flags().Changed("pull")
 			return nil
 		}),
 		RunE: Adapt(func(ctx context.Context, args []string) error {
-			project, _, err := p.ToProject(ctx, dockerCli, []string{options.Service}, cgo.WithResolvedPaths(true), cgo.WithDiscardEnvFile)
+			project, _, err := p.ToProject(ctx, dockerCli, []string{options.Service}, cgo.WithResolvedPaths(true), cgo.WithoutEnvironmentResolution)
+			if err != nil {
+				return err
+			}
+
+			project, err = project.WithServicesEnvironmentResolved(true)
 			if err != nil {
 				return err
 			}
@@ -175,6 +215,7 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.Detach, "detach", "d", false, "Run container in background and print container ID")
 	flags.StringArrayVarP(&options.environment, "env", "e", []string{}, "Set environment variables")
+	flags.StringArrayVar(&options.envFiles, "env-from-file", []string{}, "Set environment variables from file")
 	flags.StringArrayVarP(&options.labels, "label", "l", []string{}, "Add or override a label")
 	flags.BoolVar(&options.Remove, "rm", false, "Automatically remove the container when it exits")
 	flags.BoolVarP(&options.noTty, "no-TTY", "T", !dockerCli.Out().IsTerminal(), "Disable pseudo-TTY allocation (default: auto-detected)")
@@ -190,6 +231,8 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 	flags.BoolVar(&options.useAliases, "use-aliases", false, "Use the service's network useAliases in the network(s) the container connects to")
 	flags.BoolVarP(&options.servicePorts, "service-ports", "P", false, "Run command with all service's ports enabled and mapped to the host")
 	flags.StringVar(&createOpts.Pull, "pull", "policy", `Pull image before running ("always"|"missing"|"never")`)
+	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Don't print anything to STDOUT")
+	flags.BoolVar(&buildOpts.quiet, "quiet-build", false, "Suppress progress output from the build process")
 	flags.BoolVar(&options.quietPull, "quiet-pull", false, "Pull without printing progress information")
 	flags.BoolVar(&createOpts.Build, "build", false, "Build image before starting container")
 	flags.BoolVar(&options.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file")
@@ -221,6 +264,10 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 
 	err = createOpts.Apply(project)
 	if err != nil {
+		return err
+	}
+
+	if err := checksForRemoteStack(ctx, dockerCli, project, buildOpts, createOpts.AssumeYes, []string{}); err != nil {
 		return err
 	}
 
@@ -260,6 +307,11 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		buildForRun = &bo
 	}
 
+	environment, err := options.getEnvironment()
+	if err != nil {
+		return err
+	}
+
 	// start container and attach to container streams
 	runOpts := api.RunOptions{
 		Build:             buildForRun,
@@ -272,9 +324,9 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		Interactive:       options.interactive,
 		WorkingDir:        options.workdir,
 		User:              options.user,
-		CapAdd:            options.capAdd.GetAll(),
-		CapDrop:           options.capDrop.GetAll(),
-		Environment:       options.environment,
+		CapAdd:            options.capAdd.GetSlice(),
+		CapDrop:           options.capDrop.GetSlice(),
+		Environment:       environment.Values(),
 		Entrypoint:        options.entrypointCmd,
 		Labels:            labels,
 		UseNetworkAliases: options.useAliases,

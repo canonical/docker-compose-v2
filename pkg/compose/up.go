@@ -25,12 +25,12 @@ import (
 	"syscall"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/cli/cli"
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
-	"github.com/docker/docker/errdefs"
 	"github.com/eiannone/keyboard"
 	"github.com/hashicorp/go-multierror"
 	"github.com/sirupsen/logrus"
@@ -72,6 +72,26 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 	var isTerminated atomic.Bool
 	printer := newLogPrinter(options.Start.Attach)
 
+	watcher, err := NewWatcher(project, options, s.watch)
+	if err != nil && options.Start.Watch {
+		return err
+	}
+
+	var navigationMenu *formatter.LogKeyboard
+	var kEvents <-chan keyboard.KeyEvent
+	if options.Start.NavigationMenu {
+		kEvents, err = keyboard.GetKeys(100)
+		if err != nil {
+			logrus.Warnf("could not start menu, an error occurred while starting: %v", err)
+			options.Start.NavigationMenu = false
+		} else {
+			defer keyboard.Close() //nolint:errcheck
+			isDockerDesktopActive := s.isDesktopIntegrationActive()
+			tracing.KeyboardMetrics(ctx, options.Start.NavigationMenu, isDockerDesktopActive, watcher != nil)
+			navigationMenu = formatter.NewKeyboardManager(isDockerDesktopActive, signalChan, options.Start.Watch, watcher)
+		}
+	}
+
 	doneCh := make(chan bool)
 	eg.Go(func() error {
 		first := true
@@ -89,27 +109,12 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 			first = false
 		}
 
-		var kEvents <-chan keyboard.KeyEvent
-		if options.Start.NavigationMenu {
-			kEvents, err = keyboard.GetKeys(100)
-			if err != nil {
-				logrus.Warn("could not start menu, an error occurred while starting.")
-			} else {
-				defer keyboard.Close() //nolint:errcheck
-				isWatchConfigured := s.shouldWatch(project)
-				isDockerDesktopActive := s.isDesktopIntegrationActive()
-				tracing.KeyboardMetrics(ctx, options.Start.NavigationMenu, isDockerDesktopActive, isWatchConfigured)
-
-				formatter.NewKeyboardManager(ctx, isDockerDesktopActive, isWatchConfigured, signalChan, s.watch)
-				if options.Start.Watch {
-					formatter.KeyboardManager.StartWatch(ctx, doneCh, project, options)
-				}
-			}
-		}
-
 		for {
 			select {
 			case <-doneCh:
+				if watcher != nil {
+					return watcher.Stop()
+				}
 				return nil
 			case <-ctx.Done():
 				if first {
@@ -117,6 +122,7 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 				}
 			case <-signalChan:
 				if first {
+					keyboard.Close() //nolint:errcheck
 					gracefulTeardown()
 					break
 				}
@@ -127,7 +133,7 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 						All:      true,
 					})
 					// Ignore errors indicating that some of the containers were already stopped or removed.
-					if errdefs.IsNotFound(err) || errdefs.IsConflict(err) {
+					if cerrdefs.IsNotFound(err) || cerrdefs.IsConflict(err) {
 						return nil
 					}
 
@@ -135,7 +141,7 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 				})
 				return nil
 			case event := <-kEvents:
-				formatter.KeyboardManager.HandleKeyEvents(event, ctx, doneCh, project, options)
+				navigationMenu.HandleKeyEvents(ctx, event, project, options)
 			}
 		}
 	})
@@ -155,15 +161,11 @@ func (s *composeService) Up(ctx context.Context, project *types.Project, options
 		return err
 	})
 
-	if options.Start.Watch && !options.Start.NavigationMenu {
-		eg.Go(func() error {
-			buildOpts := *options.Create.Build
-			buildOpts.Quiet = true
-			return s.watch(ctx, doneCh, project, options.Start.Services, api.WatchOptions{
-				Build: &buildOpts,
-				LogTo: options.Start.Attach,
-			})
-		})
+	if options.Start.Watch && watcher != nil {
+		err = watcher.Start(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// We use the parent context without cancellation as we manage sigterm to stop the stack

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -121,7 +122,7 @@ func New(dockerCli command.Cli, opts ...Option) (_ *Builder, err error) {
 
 // Validate validates builder context
 func (b *Builder) Validate() error {
-	if b.NodeGroup != nil && b.NodeGroup.DockerContext {
+	if b.NodeGroup != nil && b.DockerContext {
 		list, err := b.opts.dockerCli.ContextStore().List()
 		if err != nil {
 			return err
@@ -143,7 +144,7 @@ func (b *Builder) ContextName() string {
 		return ""
 	}
 	for _, cb := range ctxbuilders {
-		if b.NodeGroup.Driver == "docker" && len(b.NodeGroup.Nodes) == 1 && b.NodeGroup.Nodes[0].Endpoint == cb.Name {
+		if b.Driver == "docker" && len(b.NodeGroup.Nodes) == 1 && b.NodeGroup.Nodes[0].Endpoint == cb.Name {
 			return cb.Name
 		}
 	}
@@ -199,7 +200,7 @@ func (b *Builder) Boot(ctx context.Context) (bool, error) {
 		err = err1
 	}
 
-	if err == nil && len(errCh) == len(toBoot) {
+	if err == nil && len(errCh) > 0 {
 		return false, <-errCh
 	}
 	return true, err
@@ -253,7 +254,7 @@ func (b *Builder) Factory(ctx context.Context, dialMeta map[string][]string) (_ 
 			if err != nil {
 				return
 			}
-			b.Driver = b.driverFactory.Factory.Name()
+			b.Driver = b.driverFactory.Name()
 		}
 	})
 	return b.driverFactory.Factory, err
@@ -308,7 +309,7 @@ func GetBuilders(dockerCli command.Cli, txn *store.Txn) ([]*Builder, error) {
 			return nil, err
 		}
 		builders[i] = b
-		seen[b.NodeGroup.Name] = struct{}{}
+		seen[b.Name] = struct{}{}
 	}
 
 	for _, c := range contexts {
@@ -523,7 +524,7 @@ func Create(ctx context.Context, txn *store.Txn, dockerCli command.Cli, opts Cre
 	}
 
 	cancelCtx, cancel := context.WithCancelCause(ctx)
-	timeoutCtx, _ := context.WithTimeoutCause(cancelCtx, 20*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet,lostcancel // no need to manually cancel this context as we already rely on parent
+	timeoutCtx, _ := context.WithTimeoutCause(cancelCtx, 20*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet // no need to manually cancel this context as we already rely on parent
 	defer func() { cancel(errors.WithStack(context.Canceled)) }()
 
 	nodes, err := b.LoadNodes(timeoutCtx, WithData())
@@ -656,13 +657,7 @@ func parseBuildkitdFlags(inp string, driver string, driverOpts map[string]string
 	flags.StringArrayVar(&allowInsecureEntitlements, "allow-insecure-entitlement", nil, "")
 	_ = flags.Parse(res)
 
-	var hasNetworkHostEntitlement bool
-	for _, e := range allowInsecureEntitlements {
-		if e == "network.host" {
-			hasNetworkHostEntitlement = true
-			break
-		}
-	}
+	hasNetworkHostEntitlement := slices.Contains(allowInsecureEntitlements, "network.host")
 
 	var hasNetworkHostEntitlementInConf bool
 	if buildkitdConfigFile != "" {
@@ -671,11 +666,8 @@ func parseBuildkitdFlags(inp string, driver string, driverOpts map[string]string
 			return nil, err
 		} else if btoml != nil {
 			if ies := btoml.GetArray("insecure-entitlements"); ies != nil {
-				for _, e := range ies.([]string) {
-					if e == "network.host" {
-						hasNetworkHostEntitlementInConf = true
-						break
-					}
+				if slices.Contains(ies.([]string), "network.host") {
+					hasNetworkHostEntitlementInConf = true
 				}
 			}
 		}

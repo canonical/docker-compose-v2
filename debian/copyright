@@ -84,6 +84,10 @@ Files: vendor/google.golang.org/protobuf/types/*/*.pb.go
 Copyright: 2008 Google Inc
 License: BSD-3-clause-Google
 
+Files: vendor/google.golang.org/genproto/googleapis/*
+Copyright: 2024 Google LLC
+License: Apache-2.0
+
 Files: vendor/google.golang.org/genproto/googleapis/*/*/*.pb.go
 Copyright: 2015-2023 Google LLC
 License: Apache-2.0
@@ -108,21 +112,6 @@ License: Expat and BSD-3-clause-Google
 Files: vendor/sigs.k8s.io/yaml/fields.go
 Copyright: 2013 The Go Authors
 License: BSD-3-clause-Google
-
-Files: vendor/gopkg.in/yaml.v2/*
-Copyright: 2011-2016 Canonical Ltd
-License: Apache-2.0
-
-Files: vendor/gopkg.in/yaml.v2/apic.go
-       vendor/gopkg.in/yaml.v2/emitterc.go
-       vendor/gopkg.in/yaml.v2/parserc.go
-       vendor/gopkg.in/yaml.v2/readerc.go
-       vendor/gopkg.in/yaml.v2/scannerc.go
-       vendor/gopkg.in/yaml.v2/writerc.go
-       vendor/gopkg.in/yaml.v2/yamlh.go
-       vendor/gopkg.in/yaml.v2/yamlprivateh.go
-Copyright: 2006 Kirill Simonov
-License: Expat
 
 Files: vendor/gopkg.in/yaml.v3/*
 Copyright: 2011-2019 Canonical Ltd
@@ -228,10 +217,6 @@ Files: vendor/github.com/gogo/protobuf/*/*_gogo.go
        vendor/github.com/gogo/protobuf/sortkeys/sortkeys.go
 Copyright: 2013-2018 The GoGo Authors
 License: BSD-2-clause 
-
-Files: vendor/google.golang.org/genproto/googleapis/*
-Copyright: 2024 Google LLC
-License: Apache-2.0
 
 Files: vendor/github.com/pkg/errors/*
 Copyright: 2015 Dave Cheney <dave@cheney.net>
@@ -361,10 +346,6 @@ License: MPL-2.0
 Files: vendor/github.com/beorn7/perks/*
 Copyright: 2013 Blake Mizerany
 License: Expat
-
-Files: vendor/github.com/AdaLogics/go-fuzz-headers/*
-Copyright: 2023 The go-fuzz-headers Authors
-License: Apache-2.0
 
 Files: vendor/github.com/xeipuuv/*
 Copyright: 2015 xeipuuv <https://github.com/xeipuuv>
@@ -506,7 +487,7 @@ Files: vendor/github.com/opencontainers/image-spec/*
 Copyright: 2016-2022 The Linux Foundation
 License: Apache-2.0
 
-Files: vendor/github.com/imdario/mergo/*
+Files: vendor/dario.cat/mergo/*
 Copyright: 2013-2014 Dario Castañé
            2009-2012 The Go Authors
 License: BSD-3-clause-Google

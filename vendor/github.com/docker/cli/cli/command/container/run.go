@@ -43,7 +43,7 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 			}
 			return runRun(cmd.Context(), dockerCli, cmd.Flags(), &options, copts)
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli),
+		ValidArgsFunction: completion.ImageNames(dockerCli, 1),
 		Annotations: map[string]string{
 			"category-top": "1",
 			"aliases":      "docker container run, docker run",
@@ -60,6 +60,7 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 	flags.StringVar(&options.detachKeys, "detach-keys", "", "Override the key sequence for detaching a container")
 	flags.StringVar(&options.pull, "pull", PullImageMissing, `Pull image before running ("`+PullImageAlways+`", "`+PullImageMissing+`", "`+PullImageNever+`")`)
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Suppress the pull output")
+	flags.BoolVarP(&options.createOptions.useAPISocket, "use-api-socket", "", false, "Bind mount Docker API socket and required auth")
 
 	// Add an explicit help that doesn't have a `-h` to prevent the conflict
 	// with hostname
@@ -84,10 +85,12 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 
 func runRun(ctx context.Context, dockerCli command.Cli, flags *pflag.FlagSet, ropts *runOptions, copts *containerOptions) error {
 	if err := validatePullOpt(ropts.pull); err != nil {
-		reportError(dockerCli.Err(), "run", err.Error(), true)
-		return cli.StatusError{StatusCode: 125}
+		return cli.StatusError{
+			Status:     withHelp(err, "run").Error(),
+			StatusCode: 125,
+		}
 	}
-	proxyConfig := dockerCli.ConfigFile().ParseProxyConfig(dockerCli.Client().DaemonHost(), opts.ConvertKVStringsToMapWithNil(copts.env.GetAll()))
+	proxyConfig := dockerCli.ConfigFile().ParseProxyConfig(dockerCli.Client().DaemonHost(), opts.ConvertKVStringsToMapWithNil(copts.env.GetSlice()))
 	newEnv := []string{}
 	for k, v := range proxyConfig {
 		if v == nil {
@@ -100,12 +103,10 @@ func runRun(ctx context.Context, dockerCli command.Cli, flags *pflag.FlagSet, ro
 	containerCfg, err := parse(flags, copts, dockerCli.ServerInfo().OSType)
 	// just in case the parse does not exit
 	if err != nil {
-		reportError(dockerCli.Err(), "run", err.Error(), true)
-		return cli.StatusError{StatusCode: 125}
-	}
-	if err = validateAPIVersion(containerCfg, dockerCli.CurrentVersion()); err != nil {
-		reportError(dockerCli.Err(), "run", err.Error(), true)
-		return cli.StatusError{StatusCode: 125}
+		return cli.StatusError{
+			Status:     withHelp(err, "run").Error(),
+			StatusCode: 125,
+		}
 	}
 	return runContainer(ctx, dockerCli, ropts, copts, containerCfg)
 }
@@ -124,7 +125,7 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 		}
 	} else {
 		if copts.attach.Len() != 0 {
-			return errors.New("Conflicting options: -a and -d")
+			return errors.New("conflicting options: cannot specify both --attach and --detach")
 		}
 
 		config.AttachStdin = false
@@ -135,8 +136,7 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 
 	containerID, err := createContainer(ctx, dockerCli, containerCfg, &runOpts.createOptions)
 	if err != nil {
-		reportError(stderr, "run", err.Error(), true)
-		return runStartContainerErr(err)
+		return toStatusError(err)
 	}
 	if runOpts.sigProxy {
 		sigc := notifyAllSignals()
@@ -156,7 +156,8 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 		waitDisplayID chan struct{}
 		errCh         chan error
 	)
-	if !config.AttachStdout && !config.AttachStderr {
+	attach := config.AttachStdin || config.AttachStdout || config.AttachStderr
+	if !attach {
 		// Make this asynchronous to allow the client to write to stdin before having to read the ID
 		waitDisplayID = make(chan struct{})
 		go func() {
@@ -164,7 +165,6 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 			_, _ = fmt.Fprintln(stdout, containerID)
 		}()
 	}
-	attach := config.AttachStdin || config.AttachStdout || config.AttachStderr
 	if attach {
 		detachKeys := dockerCli.ConfigFile().DetachKeys
 		if runOpts.detachKeys != "" {
@@ -203,22 +203,29 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 			<-errCh
 		}
 
-		reportError(stderr, "run", err.Error(), false)
 		if copts.autoRemove {
 			// wait container to be removed
 			<-statusChan
 		}
-		return runStartContainerErr(err)
+		return toStatusError(err)
 	}
 
-	if (config.AttachStdin || config.AttachStdout || config.AttachStderr) && config.Tty && dockerCli.Out().IsTerminal() {
+	// Detached mode: wait for the id to be displayed and return.
+	if !attach {
+		// Detached mode
+		<-waitDisplayID
+		return nil
+	}
+
+	if config.Tty && dockerCli.Out().IsTerminal() {
 		if err := MonitorTtySize(ctx, dockerCli, containerID, false); err != nil {
 			_, _ = fmt.Fprintln(stderr, "Error monitoring TTY size:", err)
 		}
 	}
 
-	if errCh != nil {
-		if err := <-errCh; err != nil {
+	select {
+	case err := <-errCh:
+		if err != nil {
 			if _, ok := err.(term.EscapeError); ok {
 				// The user entered the detach escape sequence.
 				return nil
@@ -227,19 +234,26 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 			logrus.Debugf("Error hijack: %s", err)
 			return err
 		}
+		status := <-statusChan
+		if status != 0 {
+			return cli.StatusError{StatusCode: status}
+		}
+	case status := <-statusChan:
+		// If container exits, output stream processing may not be finished yet,
+		// we need to keep the streamer running until all output is read.
+		// However, if stdout or stderr is not attached, we can just exit.
+		if !config.AttachStdout && !config.AttachStderr {
+			// Notify hijackedIOStreamer that we're exiting and wait
+			// so that the terminal can be restored.
+			cancelFun()
+		}
+		<-errCh // Drain channel but don't care about result
+
+		if status != 0 {
+			return cli.StatusError{StatusCode: status}
+		}
 	}
 
-	// Detached mode: wait for the id to be displayed and return.
-	if !config.AttachStdout && !config.AttachStderr {
-		// Detached mode
-		<-waitDisplayID
-		return nil
-	}
-
-	status := <-statusChan
-	if status != 0 {
-		return cli.StatusError{StatusCode: status}
-	}
 	return nil
 }
 
@@ -291,30 +305,43 @@ func attachContainer(ctx context.Context, dockerCli command.Cli, containerID str
 	return resp.Close, nil
 }
 
-// reportError is a utility method that prints a user-friendly message
-// containing the error that occurred during parsing and a suggestion to get help
-func reportError(stderr io.Writer, name string, str string, withHelp bool) {
-	str = strings.TrimSuffix(str, ".") + "."
-	if withHelp {
-		str += "\nSee 'docker " + name + " --help'."
-	}
-	_, _ = fmt.Fprintln(stderr, "docker:", str)
+// withHelp decorates the error with a suggestion to use "--help".
+func withHelp(err error, commandName string) error {
+	return fmt.Errorf("docker: %w\n\nRun 'docker %s --help' for more information", err, commandName)
 }
 
-// if container start fails with 'not found'/'no such' error, return 127
-// if container start fails with 'permission denied' error, return 126
-// return 125 for generic docker daemon failures
-func runStartContainerErr(err error) error {
-	trimmedErr := strings.TrimPrefix(err.Error(), "Error response from daemon: ")
-	statusError := cli.StatusError{StatusCode: 125}
-	if strings.Contains(trimmedErr, "executable file not found") ||
-		strings.Contains(trimmedErr, "no such file or directory") ||
-		strings.Contains(trimmedErr, "system cannot find the file specified") {
-		statusError = cli.StatusError{StatusCode: 127}
-	} else if strings.Contains(trimmedErr, syscall.EACCES.Error()) ||
-		strings.Contains(trimmedErr, syscall.EISDIR.Error()) {
-		statusError = cli.StatusError{StatusCode: 126}
+// toStatusError attempts to detect specific error-conditions to assign
+// an appropriate exit-code for situations where the problem originates
+// from the container. It returns [cli.StatusError] with the original
+// error message and the Status field set as follows:
+//
+// - 125: for generic failures sent back from the daemon
+// - 126: if container start fails with 'permission denied' error
+// - 127: if container start fails with 'not found'/'no such' error
+func toStatusError(err error) error {
+	// TODO(thaJeztah): some of these errors originate from the container: should we actually suggest "--help" for those?
+
+	errMsg := err.Error()
+
+	if strings.Contains(errMsg, "executable file not found") || strings.Contains(errMsg, "no such file or directory") || strings.Contains(errMsg, "system cannot find the file specified") {
+		return cli.StatusError{
+			Cause:      err,
+			Status:     withHelp(err, "run").Error(),
+			StatusCode: 127,
+		}
 	}
 
-	return statusError
+	if strings.Contains(errMsg, syscall.EACCES.Error()) || strings.Contains(errMsg, syscall.EISDIR.Error()) {
+		return cli.StatusError{
+			Cause:      err,
+			Status:     withHelp(err, "run").Error(),
+			StatusCode: 126,
+		}
+	}
+
+	return cli.StatusError{
+		Cause:      err,
+		Status:     withHelp(err, "run").Error(),
+		StatusCode: 125,
+	}
 }

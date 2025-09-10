@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"github.com/docker/buildx/util/gitutil"
 	"github.com/docker/buildx/util/osutil"
 	"github.com/moby/buildkit/client"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
@@ -95,7 +96,7 @@ func getGitAttributes(ctx context.Context, contextPath, dockerfilePath string) (
 			sha += "-dirty"
 		}
 		if setGitLabels {
-			res["label:"+specs.AnnotationRevision] = sha
+			res["label:"+ocispecs.AnnotationRevision] = sha
 		}
 		if setGitInfo {
 			res["vcs:revision"] = sha
@@ -104,7 +105,7 @@ func getGitAttributes(ctx context.Context, contextPath, dockerfilePath string) (
 
 	if rurl, err := gitc.RemoteURL(); err == nil && rurl != "" {
 		if setGitLabels {
-			res["label:"+specs.AnnotationSource] = rurl
+			res["label:"+ocispecs.AnnotationSource] = rurl
 		}
 		if setGitInfo {
 			res["vcs:source"] = rurl
@@ -127,9 +128,7 @@ func getGitAttributes(ctx context.Context, contextPath, dockerfilePath string) (
 		if so.FrontendAttrs == nil {
 			so.FrontendAttrs = make(map[string]string)
 		}
-		for k, v := range res {
-			so.FrontendAttrs[k] = v
-		}
+		maps.Copy(so.FrontendAttrs, res)
 
 		if !setGitInfo || root == "" {
 			return

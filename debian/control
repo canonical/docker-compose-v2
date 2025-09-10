@@ -12,9 +12,10 @@ Rules-Requires-Root: no
 
 Package: docker-compose-v2
 Architecture: any
-Depends: docker.io,
-         ${misc:Depends},
+Depends: ${misc:Depends},
          ${shlibs:Depends}
+Recommends: docker.io
+Provides: docker-compose
 Built-Using: ${libc:Built-Using}, ${misc:Built-Using}
 Description: tool for running multi-container applications on Docker
  Docker Compose is a tool for running multi-container applications on Docker

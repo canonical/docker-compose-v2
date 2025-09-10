@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -149,7 +150,7 @@ func (e *CacheOptionsEntry) UnmarshalText(text []byte) error {
 	return e.validate(text)
 }
 
-func (e *CacheOptionsEntry) validate(gv interface{}) error {
+func (e *CacheOptionsEntry) validate(gv any) error {
 	if e.Type == "" {
 		var text []byte
 		switch gv := gv.(type) {
@@ -174,6 +175,10 @@ func ParseCacheEntry(in []string) (CacheOptions, error) {
 
 	opts := make(CacheOptions, 0, len(in))
 	for _, in := range in {
+		if in == "" {
+			continue
+		}
+
 		if !strings.Contains(in, "=") {
 			// This is ref only format. Each field in the CSV is its own entry.
 			fields, err := csvvalue.Fields(in, nil)
@@ -204,13 +209,31 @@ func addGithubToken(ci *controllerapi.CacheOptionsEntry) {
 	if ci.Type != "gha" {
 		return
 	}
+	version, ok := ci.Attrs["version"]
+	if !ok {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L19
+		if v, ok := os.LookupEnv("ACTIONS_CACHE_SERVICE_V2"); ok {
+			if b, err := strconv.ParseBool(v); err == nil && b {
+				version = "2"
+			}
+		}
+	}
 	if _, ok := ci.Attrs["token"]; !ok {
 		if v, ok := os.LookupEnv("ACTIONS_RUNTIME_TOKEN"); ok {
 			ci.Attrs["token"] = v
 		}
 	}
+	if _, ok := ci.Attrs["url_v2"]; !ok && version == "2" {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L34-L35
+		if v, ok := os.LookupEnv("ACTIONS_RESULTS_URL"); ok {
+			ci.Attrs["url_v2"] = v
+		}
+	}
 	if _, ok := ci.Attrs["url"]; !ok {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L28-L33
 		if v, ok := os.LookupEnv("ACTIONS_CACHE_URL"); ok {
+			ci.Attrs["url"] = v
+		} else if v, ok := os.LookupEnv("ACTIONS_RESULTS_URL"); ok {
 			ci.Attrs["url"] = v
 		}
 	}
@@ -251,5 +274,5 @@ func isActive(pb *controllerapi.CacheOptionsEntry) bool {
 	if pb.Type != "gha" {
 		return true
 	}
-	return pb.Attrs["token"] != "" && pb.Attrs["url"] != ""
+	return pb.Attrs["token"] != "" && (pb.Attrs["url"] != "" || pb.Attrs["url_v2"] != "")
 }

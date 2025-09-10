@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/morikuni/aec"
@@ -48,12 +49,15 @@ func pullCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 	cmd := &cobra.Command{
 		Use:   "pull [OPTIONS] [SERVICE...]",
 		Short: "Pull service images",
-		PreRunE: Adapt(func(ctx context.Context, args []string) error {
-			if opts.noParallel {
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("no-parallel") {
 				fmt.Fprint(os.Stderr, aec.Apply("option '--no-parallel' is DEPRECATED and will be ignored.\n", aec.RedF))
 			}
+			if cmd.Flags().Changed("parallel") {
+				fmt.Fprint(os.Stderr, aec.Apply("option '--parallel' is DEPRECATED and will be ignored.\n", aec.RedF))
+			}
 			return nil
-		}),
+		},
 		RunE: Adapt(func(ctx context.Context, args []string) error {
 			return runPull(ctx, dockerCli, backend, opts, args)
 		}),
@@ -64,7 +68,7 @@ func pullCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 	cmd.Flags().BoolVar(&opts.includeDeps, "include-deps", false, "Also pull services declared as dependencies")
 	cmd.Flags().BoolVar(&opts.parallel, "parallel", true, "DEPRECATED pull multiple images in parallel")
 	flags.MarkHidden("parallel") //nolint:errcheck
-	cmd.Flags().BoolVar(&opts.parallel, "no-parallel", true, "DEPRECATED disable parallel pulling")
+	cmd.Flags().BoolVar(&opts.noParallel, "no-parallel", true, "DEPRECATED disable parallel pulling")
 	flags.MarkHidden("no-parallel") //nolint:errcheck
 	cmd.Flags().BoolVar(&opts.ignorePullFailures, "ignore-pull-failures", false, "Pull what it can and ignores images with pull failures")
 	cmd.Flags().BoolVar(&opts.noBuildable, "ignore-buildable", false, "Ignore images that can be built")
@@ -94,7 +98,7 @@ func (opts pullOptions) apply(project *types.Project, services []string) (*types
 }
 
 func runPull(ctx context.Context, dockerCli command.Cli, backend api.Service, opts pullOptions, services []string) error {
-	project, _, err := opts.ToProject(ctx, dockerCli, services)
+	project, _, err := opts.ToProject(ctx, dockerCli, services, cli.WithoutEnvironmentResolution)
 	if err != nil {
 		return err
 	}

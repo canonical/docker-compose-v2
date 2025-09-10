@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -40,11 +41,10 @@ import (
 	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/solver/pb"
 	spb "github.com/moby/buildkit/sourcepolicy/pb"
-	"github.com/moby/buildkit/util/entitlements"
 	"github.com/moby/buildkit/util/progress/progresswriter"
 	"github.com/moby/buildkit/util/tracing"
 	"github.com/opencontainers/go-digest"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/tonistiigi/fsutil"
@@ -63,7 +63,7 @@ type Options struct {
 	Inputs Inputs
 
 	Ref                        string
-	Allow                      []entitlements.Entitlement
+	Allow                      []string
 	Attests                    map[string]*string
 	BuildArgs                  map[string]string
 	CacheFrom                  []client.CacheOptionsEntry
@@ -76,7 +76,7 @@ type Options struct {
 	NetworkMode                string
 	NoCache                    bool
 	NoCacheFilter              []string
-	Platforms                  []specs.Platform
+	Platforms                  []ocispecs.Platform
 	Pull                       bool
 	SecretSpecs                []*controllerapi.Secret
 	SSHSpecs                   []*controllerapi.SSH
@@ -205,15 +205,6 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 		return nil, err
 	}
 
-	defers := make([]func(), 0, 2)
-	defer func() {
-		if err != nil {
-			for _, f := range defers {
-				f()
-			}
-		}
-	}()
-
 	reqForNodes := make(map[string][]*reqForNode)
 	eg, ctx := errgroup.WithContext(ctx)
 
@@ -243,11 +234,11 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 			if err != nil {
 				return nil, err
 			}
+			defer release()
 			if err := saveLocalState(so, k, opt, np.Node(), cfg); err != nil {
 				return nil, err
 			}
 			addGitAttrs(so)
-			defers = append(defers, release)
 			reqn = append(reqn, &reqForNode{
 				resolvedNode: np,
 				so:           so,
@@ -392,7 +383,6 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 						wg.Add(1)
 						sharedSessionsWG[node.Name] = wg
 						for _, s := range sessions {
-							s := s
 							eg.Go(func() error {
 								return s.Run(baseCtx, c.Dialer())
 							})
@@ -432,9 +422,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 						FrontendInputs: frontendInputs,
 						FrontendOpt:    make(map[string]string),
 					}
-					for k, v := range so.FrontendAttrs {
-						req.FrontendOpt[k] = v
-					}
+					maps.Copy(req.FrontendOpt, so.FrontendAttrs)
 					so.Frontend = ""
 					so.FrontendInputs = nil
 
@@ -536,11 +524,10 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 							}
 						}
 					}
-
 					node := dp.Node().Driver
 					if node.IsMobyDriver() {
 						for _, e := range so.Exports {
-							if e.Type == "moby" && e.Attrs["push"] != "" {
+							if e.Type == "moby" && e.Attrs["push"] != "" && !node.Features(ctx)[driver.DirectPush] {
 								if ok, _ := strconv.ParseBool(e.Attrs["push"]); ok {
 									pushNames = e.Attrs["name"]
 									if pushNames == "" {
@@ -570,6 +557,14 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 									}
 								}
 							}
+						}
+					}
+					// if prefer-image-digest is set in the solver options, remove the image
+					// config digest from the exporter's response
+					for _, e := range so.Exports {
+						if e.Attrs["prefer-image-digest"] == "true" {
+							delete(rr.ExporterResponse, exptypes.ExporterImageConfigDigestKey)
+							break
 						}
 					}
 					return nil
@@ -604,7 +599,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 
 				if pushNames != "" {
 					err := progress.Write(pw, fmt.Sprintf("merging manifest list %s", pushNames), func() error {
-						descs := make([]specs.Descriptor, 0, len(res))
+						descs := make([]ocispecs.Descriptor, 0, len(res))
 
 						for _, r := range res {
 							s, ok := r.ExporterResponse[exptypes.ExporterImageDescriptorKey]
@@ -613,7 +608,7 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 								if err != nil {
 									return err
 								}
-								var desc specs.Descriptor
+								var desc ocispecs.Descriptor
 								if err := json.Unmarshal(dt, &desc); err != nil {
 									return errors.Wrapf(err, "failed to unmarshal descriptor %s", s)
 								}
@@ -623,10 +618,10 @@ func BuildWithResultHandler(ctx context.Context, nodes []builder.Node, opts map[
 							// This is fallback for some very old buildkit versions.
 							// Note that the mediatype isn't really correct as most of the time it is image manifest and
 							// not manifest list but actually both are handled because for Docker mediatypes the
-							// mediatype value in the Accpet header does not seem to matter.
+							// mediatype value in the Accept header does not seem to matter.
 							s, ok = r.ExporterResponse[exptypes.ExporterImageDigestKey]
 							if ok {
-								descs = append(descs, specs.Descriptor{
+								descs = append(descs, ocispecs.Descriptor{
 									Digest:    digest.Digest(s),
 									MediaType: images.MediaTypeDockerSchema2ManifestList,
 									Size:      -1,
@@ -835,7 +830,7 @@ func remoteDigestWithMoby(ctx context.Context, d *driver.DriverHandle, name stri
 	if err != nil {
 		return "", err
 	}
-	img, _, err := api.ImageInspectWithRaw(ctx, name)
+	img, err := api.ImageInspect(ctx, name)
 	if err != nil {
 		return "", err
 	}

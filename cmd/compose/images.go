@@ -20,9 +20,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
+	"time"
 
+	"github.com/containerd/platforms"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
@@ -30,7 +33,6 @@ import (
 
 	"github.com/docker/compose/v2/cmd/formatter"
 	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/compose/v2/pkg/utils"
 )
 
 type imageOptions struct {
@@ -76,7 +78,7 @@ func runImages(ctx context.Context, dockerCli command.Cli, backend api.Service, 
 			if i := strings.IndexRune(img.ID, ':'); i >= 0 {
 				id = id[i+1:]
 			}
-			if !utils.StringContains(ids, id) {
+			if !slices.Contains(ids, id) {
 				ids = append(ids, id)
 			}
 		}
@@ -85,14 +87,19 @@ func runImages(ctx context.Context, dockerCli command.Cli, backend api.Service, 
 		}
 		return nil
 	}
-
-	sort.Slice(images, func(i, j int) bool {
-		return images[i].ContainerName < images[j].ContainerName
-	})
+	if opts.Format == "json" {
+		// Convert map to slice
+		var imageList []api.ImageSummary
+		for _, img := range images {
+			imageList = append(imageList, img)
+		}
+		return formatter.Print(imageList, opts.Format, dockerCli.Out(), nil)
+	}
 
 	return formatter.Print(images, opts.Format, dockerCli.Out(),
 		func(w io.Writer) {
-			for _, img := range images {
+			for _, container := range slices.Sorted(maps.Keys(images)) {
+				img := images[container]
 				id := stringid.TruncateID(img.ID)
 				size := units.HumanSizeWithPrecision(float64(img.Size), 3)
 				repo := img.Repository
@@ -103,8 +110,10 @@ func runImages(ctx context.Context, dockerCli command.Cli, backend api.Service, 
 				if tag == "" {
 					tag = "<none>"
 				}
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", img.ContainerName, repo, tag, id, size)
+				created := units.HumanDuration(time.Now().UTC().Sub(img.LastTagTime)) + " ago"
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					container, repo, tag, platforms.Format(img.Platform), id, size, created)
 			}
 		},
-		"CONTAINER", "REPOSITORY", "TAG", "IMAGE ID", "SIZE")
+		"CONTAINER", "REPOSITORY", "TAG", "PLATFORM", "IMAGE ID", "SIZE", "CREATED")
 }

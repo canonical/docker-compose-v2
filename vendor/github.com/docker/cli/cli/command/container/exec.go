@@ -10,7 +10,6 @@ import (
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/pkg/errors"
@@ -53,8 +52,8 @@ func NewExecCommand(dockerCli command.Cli) *cobra.Command {
 			options.Command = args[1:]
 			return RunExec(cmd.Context(), dockerCli, containerIDorName, options)
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCli, false, func(ctr types.Container) bool {
-			return ctr.State != "paused"
+		ValidArgsFunction: completion.ContainerNames(dockerCli, false, func(ctr container.Summary) bool {
+			return ctr.State != container.StatePaused
 		}),
 		Annotations: map[string]string{
 			"category-top": "2",
@@ -85,13 +84,13 @@ func NewExecCommand(dockerCli command.Cli) *cobra.Command {
 }
 
 // RunExec executes an `exec` command
-func RunExec(ctx context.Context, dockerCli command.Cli, containerIDorName string, options ExecOptions) error {
-	execOptions, err := parseExec(options, dockerCli.ConfigFile())
+func RunExec(ctx context.Context, dockerCLI command.Cli, containerIDorName string, options ExecOptions) error {
+	execOptions, err := parseExec(options, dockerCLI.ConfigFile())
 	if err != nil {
 		return err
 	}
 
-	apiClient := dockerCli.Client()
+	apiClient := dockerCLI.Client()
 
 	// We need to check the tty _before_ we do the ContainerExecCreate, because
 	// otherwise if we error out we will leak execIDs on the server (and
@@ -101,12 +100,12 @@ func RunExec(ctx context.Context, dockerCli command.Cli, containerIDorName strin
 		return err
 	}
 	if !execOptions.Detach {
-		if err := dockerCli.In().CheckTty(execOptions.AttachStdin, execOptions.Tty); err != nil {
+		if err := dockerCLI.In().CheckTty(execOptions.AttachStdin, execOptions.Tty); err != nil {
 			return err
 		}
 	}
 
-	fillConsoleSize(execOptions, dockerCli)
+	fillConsoleSize(execOptions, dockerCLI)
 
 	response, err := apiClient.ContainerExecCreate(ctx, containerIDorName, *execOptions)
 	if err != nil {
@@ -125,7 +124,7 @@ func RunExec(ctx context.Context, dockerCli command.Cli, containerIDorName strin
 			ConsoleSize: execOptions.ConsoleSize,
 		})
 	}
-	return interactiveExec(ctx, dockerCli, execOptions, execID)
+	return interactiveExec(ctx, dockerCLI, execOptions, execID)
 }
 
 func fillConsoleSize(execOptions *container.ExecOptions, dockerCli command.Cli) {
@@ -230,7 +229,7 @@ func parseExec(execOpts ExecOptions, configFile *configfile.ConfigFile) (*contai
 
 	// collect all the environment variables for the container
 	var err error
-	if execOptions.Env, err = opts.ReadKVEnvStrings(execOpts.EnvFile.GetAll(), execOpts.Env.GetAll()); err != nil {
+	if execOptions.Env, err = opts.ReadKVEnvStrings(execOpts.EnvFile.GetSlice(), execOpts.Env.GetSlice()); err != nil {
 		return nil, err
 	}
 

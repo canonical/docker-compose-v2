@@ -181,3 +181,42 @@ func TestMacAddress(t *testing.T) {
 	res := c.RunDockerCmd(t, "inspect", fmt.Sprintf("%s-test-1", projectName), "-f", "{{ (index .NetworkSettings.Networks \"network_mac_address_default\" ).MacAddress }}")
 	res.Assert(t, icmd.Expected{Out: "00:e0:84:35:d0:e8"})
 }
+
+func TestInterfaceName(t *testing.T) {
+	c := NewCLI(t)
+
+	version := c.RunDockerCmd(t, "version", "-f", "{{.Server.Version}}")
+	major, _, found := strings.Cut(version.Combined(), ".")
+	assert.Assert(t, found)
+	if major == "26" || major == "27" {
+		t.Skip("Skipping test due to docker version < 28")
+	}
+
+	const projectName = "network_interface_name"
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/network-interface-name/compose.yaml", "--project-name", projectName, "run", "test")
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
+	})
+	res.Assert(t, icmd.Expected{Out: "foobar@"})
+}
+
+func TestNetworkRecreate(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "network_recreate"
+	t.Cleanup(func() {
+		c.cleanupWithDown(t, projectName)
+	})
+	c.RunDockerComposeCmd(t, "-f", "./fixtures/network-recreate/compose.yaml", "--project-name", projectName, "up", "-d")
+
+	c = NewCLI(t, WithEnv("FOO=bar"))
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/network-recreate/compose.yaml", "--project-name", projectName, "--progress=plain", "up", "-d")
+	err := res.Stderr()
+	fmt.Println(err)
+	res.Assert(t, icmd.Expected{Err: `
+ Container network_recreate-web-1  Stopped
+ Network network_recreate_test  Removed
+ Network network_recreate_test  Creating
+ Network network_recreate_test  Created
+ Container network_recreate-web-1  Starting
+ Container network_recreate-web-1  Started`})
+}

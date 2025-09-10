@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,12 +52,7 @@ import (
 func buildWithBake(dockerCli command.Cli) (bool, error) {
 	b, ok := os.LookupEnv("COMPOSE_BAKE")
 	if !ok {
-		if dockerCli.ConfigFile().Plugins["compose"]["build"] == "bake" {
-			b, ok = "true", true
-		}
-	}
-	if !ok {
-		return false, nil
+		b = "true"
 	}
 	bake, err := strconv.ParseBool(b)
 	if err != nil {
@@ -72,6 +68,7 @@ func buildWithBake(dockerCli command.Cli) (bool, error) {
 	}
 	if !enabled {
 		logrus.Warnf("Docker Compose is configured to build using Bake, but buildkit isn't enabled")
+		return false, nil
 	}
 
 	_, err = manager.GetPlugin("buildx", dockerCli, &cobra.Command{})
@@ -117,6 +114,7 @@ type bakeTarget struct {
 	Ulimits          []string          `json:"ulimits,omitempty"`
 	Call             string            `json:"call,omitempty"`
 	Entitlements     []string          `json:"entitlements,omitempty"`
+	ExtraHosts       map[string]string `json:"extra-hosts,omitempty"`
 	Outputs          []string          `json:"output,omitempty"`
 }
 
@@ -124,6 +122,7 @@ type bakeMetadata map[string]buildStatus
 
 type buildStatus struct {
 	Digest string `json:"containerimage.digest"`
+	Image  string `json:"image.name"`
 }
 
 func (s *composeService) doBuildBake(ctx context.Context, project *types.Project, serviceToBeBuild types.Services, options api.BuildOptions) (map[string]string, error) { //nolint:gocyclo
@@ -142,11 +141,26 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		Groups:  map[string]bakeGroup{},
 		Targets: map[string]bakeTarget{},
 	}
-	var group bakeGroup
-	var privileged bool
-	var read []string
+	var (
+		group      bakeGroup
+		privileged bool
+		read       []string
+		targets    = make(map[string]string, len(serviceToBeBuild)) // service name -> build target
+	)
 
-	for serviceName, service := range serviceToBeBuild {
+	// produce a unique ID for service used as bake target
+	for serviceName := range project.Services {
+		t := strings.ReplaceAll(serviceName, ".", "_")
+		for {
+			if _, ok := targets[serviceName]; !ok {
+				targets[serviceName] = t
+				break
+			}
+			t += "_"
+		}
+	}
+
+	for serviceName, service := range project.Services {
 		if service.Build == nil {
 			continue
 		}
@@ -160,8 +174,6 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 			args[k] = *v
 		}
 
-		image := api.GetImageNameOrDefault(service, project.Name)
-
 		entitlements := build.Entitlements
 		if slices.Contains(build.Entitlements, "security.insecure") {
 			privileged = true
@@ -171,12 +183,16 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 			privileged = true
 		}
 
-		var output string
+		var outputs []string
+		var call string
 		push := options.Push && service.Image != ""
-		if len(service.Build.Platforms) > 1 {
-			output = fmt.Sprintf("type=image,push=%t", push)
-		} else {
-			output = fmt.Sprintf("type=docker,load=true,push=%t", push)
+		switch {
+		case options.Check:
+			call = "lint"
+		case len(service.Build.Platforms) > 1:
+			outputs = []string{fmt.Sprintf("type=image,push=%t", push)}
+		default:
+			outputs = []string{fmt.Sprintf("type=docker,load=true,push=%t", push)}
 		}
 
 		read = append(read, build.Context)
@@ -187,14 +203,15 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 			}
 		}
 
-		cfg.Targets[serviceName] = bakeTarget{
+		target := targets[serviceName]
+		cfg.Targets[target] = bakeTarget{
 			Context:          build.Context,
-			Contexts:         additionalContexts(build.AdditionalContexts),
+			Contexts:         additionalContexts(build.AdditionalContexts, targets),
 			Dockerfile:       dockerFilePath(build.Context, build.Dockerfile),
-			DockerfileInline: build.DockerfileInline,
+			DockerfileInline: strings.ReplaceAll(build.DockerfileInline, "${", "$${"),
 			Args:             args,
 			Labels:           build.Labels,
-			Tags:             append(build.Tags, image),
+			Tags:             append(build.Tags, api.GetImageNameOrDefault(service, project.Name)),
 
 			CacheFrom: build.CacheFrom,
 			// CacheTo:    TODO
@@ -207,9 +224,19 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 			ShmSize:      build.ShmSize,
 			Ulimits:      toBakeUlimits(build.Ulimits),
 			Entitlements: entitlements,
-			Outputs:      []string{output},
+			ExtraHosts:   toBakeExtraHosts(build.ExtraHosts),
+
+			Outputs: outputs,
+			Call:    call,
 		}
-		group.Targets = append(group.Targets, serviceName)
+	}
+
+	// create a bake group with targets for services to build
+	for serviceName, service := range serviceToBeBuild {
+		if service.Build == nil {
+			continue
+		}
+		group.Targets = append(group.Targets, targets[serviceName])
 	}
 
 	cfg.Groups["default"] = group
@@ -219,19 +246,31 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		return nil, err
 	}
 
-	logrus.Debugf("bake build config:\n%s", string(b))
-
-	metadata, err := os.CreateTemp(os.TempDir(), "compose")
-	if err != nil {
+	if options.Print {
+		_, err = fmt.Fprintln(s.stdout(), string(b))
 		return nil, err
 	}
+	logrus.Debugf("bake build config:\n%s", string(b))
+
+	var metadataFile string
+	for {
+		// we don't use os.CreateTemp here as we need a temporary file name, but don't want it actually created
+		// as bake relies on atomicwriter and this creates conflict during rename
+		metadataFile = filepath.Join(os.TempDir(), fmt.Sprintf("compose-build-metadataFile-%d.json", rand.Int31()))
+		if _, err = os.Stat(metadataFile); os.IsNotExist(err) {
+			break
+		}
+	}
+	defer func() {
+		_ = os.Remove(metadataFile)
+	}()
 
 	buildx, err := manager.GetPlugin("buildx", s.dockerCli, &cobra.Command{})
 	if err != nil {
 		return nil, err
 	}
 
-	args := []string{"bake", "--file", "-", "--progress", "rawjson", "--metadata-file", metadata.Name()}
+	args := []string{"bake", "--file", "-", "--progress", "rawjson", "--metadata-file", metadataFile}
 	mustAllow := buildx.Version != "" && versions.GreaterThanOrEqualTo(buildx.Version[1:], "0.17.0")
 	if mustAllow {
 		// FIXME we should prompt user about this, but this is a breaking change in UX
@@ -246,6 +285,9 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 	if options.Builder != "" {
 		args = append(args, "--builder", options.Builder)
 	}
+	if options.Quiet {
+		args = append(args, "--progress=quiet")
+	}
 
 	logrus.Debugf("Executing bake with args: %v", args)
 
@@ -255,9 +297,8 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 
 	// Use docker/cli mechanism to propagate termination signal to child process
 	server, err := socket.NewPluginServer(nil)
-	if err != nil {
+	if err == nil {
 		defer server.Close() //nolint:errcheck
-		cmd.Cancel = server.Close
 		cmd.Env = replace(cmd.Env, socket.EnvKey, server.Addr().String())
 	}
 
@@ -275,7 +316,7 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		return nil, err
 	}
 
-	var errMessage string
+	var errMessage []string
 	scanner := bufio.NewScanner(pipe)
 	scanner.Split(bufio.ScanLines)
 
@@ -291,7 +332,9 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		err := decoder.Decode(&status)
 		if err != nil {
 			if strings.HasPrefix(line, "ERROR: ") {
-				errMessage = line[7:]
+				errMessage = append(errMessage, line[7:])
+			} else {
+				errMessage = append(errMessage, line)
 			}
 			continue
 		}
@@ -301,13 +344,13 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 
 	err = eg.Wait()
 	if err != nil {
-		if errMessage != "" {
-			return nil, errors.New(errMessage)
+		if len(errMessage) > 0 {
+			return nil, errors.New(strings.Join(errMessage, "\n"))
 		}
 		return nil, fmt.Errorf("failed to execute bake: %w", err)
 	}
 
-	b, err = os.ReadFile(metadata.Name())
+	b, err = os.ReadFile(metadataFile)
 	if err != nil {
 		return nil, err
 	}
@@ -320,18 +363,31 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 
 	cw := progress.ContextWriter(ctx)
 	results := map[string]string{}
-	for name, m := range md {
-		results[name] = m.Digest
+	for name := range serviceToBeBuild {
+		target := targets[name]
+		built, ok := md[target]
+		if !ok {
+			return nil, fmt.Errorf("build result not found in Bake metadata for service %s", name)
+		}
+		results[name] = built.Digest
 		cw.Event(progress.BuiltEvent(name))
 	}
 	return results, nil
 }
 
-func additionalContexts(contexts types.Mapping) map[string]string {
+func toBakeExtraHosts(hosts types.HostsList) map[string]string {
+	m := make(map[string]string)
+	for k, v := range hosts {
+		m[k] = strings.Join(v, ",")
+	}
+	return m
+}
+
+func additionalContexts(contexts types.Mapping, targets map[string]string) map[string]string {
 	ac := map[string]string{}
 	for k, v := range contexts {
 		if target, found := strings.CutPrefix(v, types.ServicePrefix); found {
-			v = "target:" + target
+			v = "target:" + targets[target]
 		}
 		ac[k] = v
 	}
@@ -396,8 +452,15 @@ func dockerFilePath(ctxName string, dockerfile string) string {
 	if dockerfile == "" {
 		return ""
 	}
-	if urlutil.IsGitURL(ctxName) || filepath.IsAbs(dockerfile) {
+	if urlutil.IsGitURL(ctxName) {
 		return dockerfile
 	}
-	return filepath.Join(ctxName, dockerfile)
+	if !filepath.IsAbs(dockerfile) {
+		dockerfile = filepath.Join(ctxName, dockerfile)
+	}
+	symlinks, err := filepath.EvalSymlinks(dockerfile)
+	if err == nil {
+		return symlinks
+	}
+	return dockerfile
 }
