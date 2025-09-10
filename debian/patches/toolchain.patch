@@ -1,11 +1,11 @@
-Description: Set go minimum version to 1.22
+Description: Set go minimum version to 1.23
  Starting in go 1.21, the "go $VERSION" line in the go.mod file is no longer an
  advisory on which toolchain version should be used. Instead, it mandates that
  a version greater or equal the specified one is used. When the local go
  version does not meet that requirement, the go tooling tries to download a new
  version of the toolchain to meet that requirement.
  There is no documentation in the docker composer upstream development history
- for the version bump from 1.22.0 to 1.22.10. Let's loosen this requirement. The
+ for the version bump to 1.23.8. Let's loosen this requirement. The
  changes in between those versions can be seen in
  https://go.dev/doc/devel/release#go1.22.minor.
  See https://go.dev/doc/toolchain for further reference.
@@ -19,8 +19,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 @@ -1,6 +1,6 @@
  module github.com/docker/compose/v2
  
--go 1.22.10
-+go 1.22
+-go 1.23.8
++go 1.23
  
  require (
  	github.com/AlecAivazis/survey/v2 v2.3.7
