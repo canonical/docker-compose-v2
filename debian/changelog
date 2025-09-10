@@ -1,3 +1,9 @@
+docker-compose-v2 (2.37.1+ds1-0ubuntu2~25.04.1) plucky; urgency=medium
+
+  * Backport from questing to plucky (LP: #2112523)
+
+ -- Athos Ribeiro <athos.ribeiro@canonical.com>  Wed, 10 Sep 2025 14:50:43 -0300
+
 docker-compose-v2 (2.37.1+ds1-0ubuntu2) questing; urgency=medium
 
   [ Renan Rodrigo ]
