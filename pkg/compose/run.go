@@ -22,12 +22,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	cmd "github.com/docker/cli/cli/command/container"
 	"github.com/docker/compose/v2/pkg/api"
-	"github.com/docker/compose/v2/pkg/utils"
 	"github.com/docker/docker/pkg/stringid"
 )
 
@@ -130,11 +130,11 @@ func applyRunOptions(project *types.Project, service *types.ServiceConfig, opts 
 
 	if len(opts.CapAdd) > 0 {
 		service.CapAdd = append(service.CapAdd, opts.CapAdd...)
-		service.CapDrop = utils.Remove(service.CapDrop, opts.CapAdd...)
+		service.CapDrop = slices.DeleteFunc(service.CapDrop, func(e string) bool { return slices.Contains(opts.CapAdd, e) })
 	}
 	if len(opts.CapDrop) > 0 {
 		service.CapDrop = append(service.CapDrop, opts.CapDrop...)
-		service.CapAdd = utils.Remove(service.CapAdd, opts.CapDrop...)
+		service.CapAdd = slices.DeleteFunc(service.CapAdd, func(e string) bool { return slices.Contains(opts.CapDrop, e) })
 	}
 	if opts.WorkingDir != "" {
 		service.WorkingDir = opts.WorkingDir
@@ -151,6 +151,9 @@ func applyRunOptions(project *types.Project, service *types.ServiceConfig, opts 
 			v, ok := envResolver(project.Environment)(s)
 			return v, ok
 		}).RemoveEmpty()
+		if service.Environment == nil {
+			service.Environment = types.MappingWithEquals{}
+		}
 		service.Environment.OverrideBy(serviceOverrideEnv)
 	}
 	for k, v := range opts.Labels {

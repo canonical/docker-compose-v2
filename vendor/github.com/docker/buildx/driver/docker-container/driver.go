@@ -23,12 +23,11 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/system"
-	dockerclient "github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
-	dockerarchive "github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/idtools"
+	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/moby/buildkit/client"
+	mobyarchive "github.com/moby/go-archive"
 	"github.com/pkg/errors"
 )
 
@@ -56,6 +55,7 @@ type Driver struct {
 	restartPolicy container.RestartPolicy
 	env           []string
 	defaultLoad   bool
+	gpus          []container.DeviceRequest
 }
 
 func (d *Driver) IsMobyDriver() bool {
@@ -70,7 +70,7 @@ func (d *Driver) Bootstrap(ctx context.Context, l progress.Logger) error {
 	return progress.Wrap("[internal] booting buildkit", l, func(sub progress.SubLogger) error {
 		_, err := d.DockerAPI.ContainerInspect(ctx, d.Name)
 		if err != nil {
-			if dockerclient.IsErrNotFound(err) {
+			if errdefs.IsNotFound(err) {
 				return d.create(ctx, sub)
 			}
 			return err
@@ -95,19 +95,20 @@ func (d *Driver) create(ctx context.Context, l progress.SubLogger) error {
 		if err != nil {
 			return err
 		}
-		rc, err := d.DockerAPI.ImageCreate(ctx, imageName, image.CreateOptions{
+		resp, err := d.DockerAPI.ImageCreate(ctx, imageName, image.CreateOptions{
 			RegistryAuth: ra,
 		})
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(io.Discard, rc)
-		return err
+		defer resp.Close()
+		return jsonmessage.DisplayJSONMessagesStream(resp, io.Discard, 0, false, nil)
 	}); err != nil {
 		// image pulling failed, check if it exists in local image store.
 		// if not, return pulling error. otherwise log it.
-		_, _, errInspect := d.DockerAPI.ImageInspectWithRaw(ctx, imageName)
-		if errInspect != nil {
+		_, errInspect := d.DockerAPI.ImageInspect(ctx, imageName)
+		found := errInspect == nil
+		if !found {
 			return err
 		}
 		l.Wrap("pulling failed, using local image "+imageName, func() error { return nil })
@@ -137,25 +138,28 @@ func (d *Driver) create(ctx context.Context, l progress.SubLogger) error {
 			hc.NetworkMode = container.NetworkMode(d.netMode)
 		}
 		if d.memory != 0 {
-			hc.Resources.Memory = int64(d.memory)
+			hc.Memory = int64(d.memory)
 		}
 		if d.memorySwap != 0 {
-			hc.Resources.MemorySwap = int64(d.memorySwap)
+			hc.MemorySwap = int64(d.memorySwap)
 		}
 		if d.cpuQuota != 0 {
-			hc.Resources.CPUQuota = d.cpuQuota
+			hc.CPUQuota = d.cpuQuota
 		}
 		if d.cpuPeriod != 0 {
-			hc.Resources.CPUPeriod = d.cpuPeriod
+			hc.CPUPeriod = d.cpuPeriod
 		}
 		if d.cpuShares != 0 {
-			hc.Resources.CPUShares = d.cpuShares
+			hc.CPUShares = d.cpuShares
 		}
 		if d.cpusetCpus != "" {
-			hc.Resources.CpusetCpus = d.cpusetCpus
+			hc.CpusetCpus = d.cpusetCpus
 		}
 		if d.cpusetMems != "" {
-			hc.Resources.CpusetMems = d.cpusetMems
+			hc.CpusetMems = d.cpusetMems
+		}
+		if len(d.gpus) > 0 && d.hasGPUCapability(ctx, cfg.Image, d.gpus) {
+			hc.DeviceRequests = d.gpus
 		}
 		if info, err := d.DockerAPI.Info(ctx); err == nil {
 			if info.CgroupDriver == "cgroupfs" {
@@ -183,7 +187,7 @@ func (d *Driver) create(ctx context.Context, l progress.SubLogger) error {
 			return err
 		}
 		if err == nil {
-			if err := d.copyToContainer(ctx, d.InitConfig.Files); err != nil {
+			if err := d.copyToContainer(ctx, d.Files); err != nil {
 				return err
 			}
 			if err := d.start(ctx); err != nil {
@@ -245,8 +249,8 @@ func (d *Driver) copyToContainer(ctx context.Context, files map[string][]byte) e
 	if srcPath != "" {
 		defer os.RemoveAll(srcPath)
 	}
-	srcArchive, err := dockerarchive.TarWithOptions(srcPath, &dockerarchive.TarOptions{
-		ChownOpts: &idtools.Identity{UID: 0, GID: 0},
+	srcArchive, err := mobyarchive.TarWithOptions(srcPath, &mobyarchive.TarOptions{
+		ChownOpts: &mobyarchive.ChownOpts{UID: 0, GID: 0},
 	})
 	if err != nil {
 		return err
@@ -306,7 +310,7 @@ func (d *Driver) start(ctx context.Context) error {
 func (d *Driver) Info(ctx context.Context) (*driver.Info, error) {
 	ctn, err := d.DockerAPI.ContainerInspect(ctx, d.Name)
 	if err != nil {
-		if dockerclient.IsErrNotFound(err) {
+		if errdefs.IsNotFound(err) {
 			return &driver.Info{
 				Status: driver.Inactive,
 			}, nil
@@ -419,12 +423,38 @@ func (d *Driver) Features(ctx context.Context) map[driver.Feature]bool {
 		driver.DockerExporter: true,
 		driver.CacheExport:    true,
 		driver.MultiPlatform:  true,
+		driver.DirectPush:     true,
 		driver.DefaultLoad:    d.defaultLoad,
 	}
 }
 
 func (d *Driver) HostGatewayIP(ctx context.Context) (net.IP, error) {
 	return nil, errors.New("host-gateway is not supported by the docker-container driver")
+}
+
+// hasGPUCapability checks if docker daemon has GPU capability. We need to run
+// a dummy container with GPU device to check if the daemon has this capability
+// because there is no API to check it yet.
+func (d *Driver) hasGPUCapability(ctx context.Context, image string, gpus []container.DeviceRequest) bool {
+	cfg := &container.Config{
+		Image:      image,
+		Entrypoint: []string{"/bin/true"},
+	}
+	hc := &container.HostConfig{
+		NetworkMode: container.NetworkMode(container.IPCModeNone),
+		AutoRemove:  true,
+		Resources: container.Resources{
+			DeviceRequests: gpus,
+		},
+	}
+	resp, err := d.DockerAPI.ContainerCreate(ctx, cfg, hc, &network.NetworkingConfig{}, nil, "")
+	if err != nil {
+		return false
+	}
+	if err := d.DockerAPI.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return false
+	}
+	return true
 }
 
 func demuxConn(c net.Conn) net.Conn {

@@ -27,24 +27,19 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/docker/cli/cli/command"
-
-	"github.com/docker/docker/api/types/registry"
-
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
+	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/image/build"
-	dockertypes "github.com/docker/docker/api/types"
+	"github.com/docker/compose/v2/pkg/api"
+	buildtypes "github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/builder/remotecontext/urlutil"
-	"github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
-
-	"github.com/docker/compose/v2/pkg/api"
-
+	"github.com/moby/go-archive"
 	"github.com/sirupsen/logrus"
 )
 
@@ -131,7 +126,7 @@ func (s *composeService) doBuildClassic(ctx context.Context, project *types.Proj
 		excludes = build.TrimBuildFilesFromExcludes(excludes, relDockerfile, false)
 		buildCtx, err = archive.TarWithOptions(contextDir, &archive.TarOptions{
 			ExcludePatterns: excludes,
-			ChownOpts:       &idtools.Identity{},
+			ChownOpts:       &archive.ChownOpts{},
 		})
 		if err != nil {
 			return "", err
@@ -180,7 +175,7 @@ func (s *composeService) doBuildClassic(ctx context.Context, project *types.Proj
 
 	imageID := ""
 	aux := func(msg jsonmessage.JSONMessage) {
-		var result dockertypes.BuildResult
+		var result buildtypes.Result
 		if err := json.Unmarshal(*msg.Aux, &result); err != nil {
 			logrus.Errorf("Failed to parse aux message: %s", err)
 		} else {
@@ -220,10 +215,10 @@ func isLocalDir(c string) bool {
 	return err == nil
 }
 
-func imageBuildOptions(dockerCli command.Cli, project *types.Project, service types.ServiceConfig, options api.BuildOptions) dockertypes.ImageBuildOptions {
+func imageBuildOptions(dockerCli command.Cli, project *types.Project, service types.ServiceConfig, options api.BuildOptions) buildtypes.ImageBuildOptions {
 	config := service.Build
-	return dockertypes.ImageBuildOptions{
-		Version:     dockertypes.BuilderV1,
+	return buildtypes.ImageBuildOptions{
+		Version:     buildtypes.BuilderV1,
 		Tags:        config.Tags,
 		NoCache:     config.NoCache,
 		Remove:      true,

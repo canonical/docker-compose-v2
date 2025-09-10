@@ -47,6 +47,7 @@ type configOptions struct {
 	noInterpolate       bool
 	noNormalize         bool
 	noResolvePath       bool
+	noResolveEnv        bool
 	services            bool
 	volumes             bool
 	profiles            bool
@@ -55,6 +56,7 @@ type configOptions struct {
 	noConsistency       bool
 	variables           bool
 	environment         bool
+	lockImageDigests    bool
 }
 
 func (o *configOptions) ToProject(ctx context.Context, dockerCli command.Cli, services []string, po ...cli.ProjectOptionsFn) (*types.Project, error) {
@@ -84,9 +86,8 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 		ProjectOptions: p,
 	}
 	cmd := &cobra.Command{
-		Aliases: []string{"convert"}, // for backward compatibility with Cloud integrations
-		Use:     "config [OPTIONS] [SERVICE...]",
-		Short:   "Parse, resolve and render compose file in canonical format",
+		Use:   "config [OPTIONS] [SERVICE...]",
+		Short: "Parse, resolve and render compose file in canonical format",
 		PreRunE: Adapt(func(ctx context.Context, args []string) error {
 			if opts.quiet {
 				devnull, err := os.Open(os.DevNull)
@@ -97,6 +98,9 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 			}
 			if p.Compatibility {
 				opts.noNormalize = true
+			}
+			if opts.lockImageDigests {
+				opts.resolveImageDigests = true
 			}
 			return nil
 		}),
@@ -123,18 +127,23 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 				return runEnvironment(ctx, dockerCli, opts, args)
 			}
 
+			if opts.Format == "" {
+				opts.Format = "yaml"
+			}
 			return runConfig(ctx, dockerCli, opts, args)
 		}),
 		ValidArgsFunction: completeServiceNames(dockerCli, p),
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&opts.Format, "format", "yaml", "Format the output. Values: [yaml | json]")
+	flags.StringVar(&opts.Format, "format", "", "Format the output. Values: [yaml | json]")
 	flags.BoolVar(&opts.resolveImageDigests, "resolve-image-digests", false, "Pin image tags to digests")
+	flags.BoolVar(&opts.lockImageDigests, "lock-image-digests", false, "Produces an override file with image digests")
 	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Only validate the configuration, don't print anything")
 	flags.BoolVar(&opts.noInterpolate, "no-interpolate", false, "Don't interpolate environment variables")
 	flags.BoolVar(&opts.noNormalize, "no-normalize", false, "Don't normalize compose model")
 	flags.BoolVar(&opts.noResolvePath, "no-path-resolution", false, "Don't resolve file paths")
 	flags.BoolVar(&opts.noConsistency, "no-consistency", false, "Don't check model consistency - warning: may produce invalid Compose output")
+	flags.BoolVar(&opts.noResolveEnv, "no-env-resolution", false, "Don't resolve service env files")
 
 	flags.BoolVar(&opts.services, "services", false, "Print the service names, one per line.")
 	flags.BoolVar(&opts.volumes, "volumes", false, "Print the volume names, one per line.")
@@ -190,11 +199,22 @@ func runConfigInterpolate(ctx context.Context, dockerCli command.Cli, opts confi
 		}
 	}
 
+	if !opts.noResolveEnv {
+		project, err = project.WithServicesEnvironmentResolved(true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if !opts.noConsistency {
 		err := project.CheckContainerNameUnicity()
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if opts.lockImageDigests {
+		project = imagesOnly(project)
 	}
 
 	var content []byte
@@ -212,6 +232,18 @@ func runConfigInterpolate(ctx context.Context, dockerCli command.Cli, opts confi
 	return content, nil
 }
 
+// imagesOnly return project with all attributes removed but service.images
+func imagesOnly(project *types.Project) *types.Project {
+	digests := types.Services{}
+	for name, config := range project.Services {
+		digests[name] = types.ServiceConfig{
+			Image: config.Image,
+		}
+	}
+	project = &types.Project{Services: digests}
+	return project
+}
+
 func runConfigNoInterpolate(ctx context.Context, dockerCli command.Cli, opts configOptions, services []string) ([]byte, error) {
 	// we can't use ToProject, so the model we render here is only partially resolved
 	model, err := opts.ToModel(ctx, dockerCli, services)
@@ -223,6 +255,23 @@ func runConfigNoInterpolate(ctx context.Context, dockerCli command.Cli, opts con
 		err = resolveImageDigests(ctx, dockerCli, model)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	if opts.lockImageDigests {
+		for key, e := range model {
+			if key != "services" {
+				delete(model, key)
+			} else {
+				for _, s := range e.(map[string]any) {
+					service := s.(map[string]any)
+					for key := range service {
+						if key != "image" {
+							delete(service, key)
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -399,7 +448,16 @@ func runVariables(ctx context.Context, dockerCli command.Cli, opts configOptions
 
 	variables := template.ExtractVariables(model, template.DefaultPattern)
 
-	return formatter.Print(variables, "", dockerCli.Out(), func(w io.Writer) {
+	if opts.Format == "yaml" {
+		result, err := yaml.Marshal(variables)
+		if err != nil {
+			return err
+		}
+		fmt.Print(string(result))
+		return nil
+	}
+
+	return formatter.Print(variables, opts.Format, dockerCli.Out(), func(w io.Writer) {
 		for name, variable := range variables {
 			_, _ = fmt.Fprintf(w, "%s\t%t\t%s\t%s\n", name, variable.Required, variable.DefaultValue, variable.PresenceValue)
 		}

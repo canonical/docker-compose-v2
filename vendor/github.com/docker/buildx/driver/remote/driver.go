@@ -28,7 +28,7 @@ type Driver struct {
 	*tlsOpts
 	defaultLoad bool
 
-	// remote driver caches the client because its Bootstap/Info methods reuse it internally
+	// remote driver caches the client because its Bootstrap/Info methods reuse it internally
 	clientOnce sync.Once
 	client     *client.Client
 	err        error
@@ -48,7 +48,7 @@ func (d *Driver) Bootstrap(ctx context.Context, l progress.Logger) error {
 	}
 	return progress.Wrap("[internal] waiting for connection", l, func(_ progress.SubLogger) error {
 		cancelCtx, cancel := context.WithCancelCause(ctx)
-		ctx, _ := context.WithTimeoutCause(cancelCtx, 20*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet,lostcancel // no need to manually cancel this context as we already rely on parent
+		ctx, _ := context.WithTimeoutCause(cancelCtx, 20*time.Second, errors.WithStack(context.DeadlineExceeded)) //nolint:govet // no need to manually cancel this context as we already rely on parent
 		defer func() { cancel(errors.WithStack(context.Canceled)) }()
 		return c.Wait(ctx)
 	})
@@ -101,7 +101,7 @@ func (d *Driver) Client(ctx context.Context, opts ...client.ClientOpt) (*client.
 }
 
 func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
-	addr := d.InitConfig.EndpointAddr
+	addr := d.EndpointAddr
 	ch, err := connhelper.GetConnectionHelper(addr)
 	if err != nil {
 		return nil, err
@@ -112,7 +112,7 @@ func (d *Driver) Dial(ctx context.Context) (net.Conn, error) {
 
 	network, addr, ok := strings.Cut(addr, "://")
 	if !ok {
-		return nil, errors.Errorf("invalid endpoint address: %s", d.InitConfig.EndpointAddr)
+		return nil, errors.Errorf("invalid endpoint address: %s", d.EndpointAddr)
 	}
 
 	conn, err := util.DialContext(ctx, network, addr)
@@ -164,6 +164,7 @@ func (d *Driver) Features(ctx context.Context) map[driver.Feature]bool {
 		driver.DockerExporter: true,
 		driver.CacheExport:    true,
 		driver.MultiPlatform:  true,
+		driver.DirectPush:     true,
 		driver.DefaultLoad:    d.defaultLoad,
 	}
 }

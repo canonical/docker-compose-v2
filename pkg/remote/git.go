@@ -17,6 +17,8 @@
 package remote
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -28,8 +30,10 @@ import (
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/moby/buildkit/util/gitutil"
+	"github.com/sirupsen/logrus"
 )
 
 const GIT_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_GIT_REMOTE"
@@ -42,19 +46,21 @@ func gitRemoteLoaderEnabled() (bool, error) {
 		}
 		return enabled, err
 	}
-	return false, nil
+	return true, nil
 }
 
-func NewGitRemoteLoader(offline bool) loader.ResourceLoader {
+func NewGitRemoteLoader(dockerCli command.Cli, offline bool) loader.ResourceLoader {
 	return gitRemoteLoader{
-		offline: offline,
-		known:   map[string]string{},
+		dockerCli: dockerCli,
+		offline:   offline,
+		known:     map[string]string{},
 	}
 }
 
 type gitRemoteLoader struct {
-	offline bool
-	known   map[string]string
+	dockerCli command.Cli
+	offline   bool
+	known     map[string]string
 }
 
 func (g gitRemoteLoader) Accept(path string) bool {
@@ -70,7 +76,7 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		return "", err
 	}
 	if !enabled {
-		return "", fmt.Errorf("experimental git remote resource is disabled. %q must be set", GIT_REMOTE_ENABLED)
+		return "", fmt.Errorf("git remote resource is disabled by %q", GIT_REMOTE_ENABLED)
 	}
 
 	ref, err := gitutil.ParseGitRef(path)
@@ -166,7 +172,8 @@ func (g gitRemoteLoader) checkout(ctx context.Context, path string, ref *gitutil
 	cmd = exec.CommandContext(ctx, "git", "fetch", "--depth=1", "origin", ref.Commit)
 	cmd.Env = g.gitCommandEnv()
 	cmd.Dir = path
-	err = cmd.Run()
+
+	err = g.run(cmd)
 	if err != nil {
 		return err
 	}
@@ -178,6 +185,19 @@ func (g gitRemoteLoader) checkout(ctx context.Context, path string, ref *gitutil
 		return err
 	}
 	return nil
+}
+
+func (g gitRemoteLoader) run(cmd *exec.Cmd) error {
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		output, err := cmd.CombinedOutput()
+		scanner := bufio.NewScanner(bytes.NewBuffer(output))
+		for scanner.Scan() {
+			line := scanner.Text()
+			logrus.Debug(line)
+		}
+		return err
+	}
+	return cmd.Run()
 }
 
 func (g gitRemoteLoader) gitCommandEnv() []string {

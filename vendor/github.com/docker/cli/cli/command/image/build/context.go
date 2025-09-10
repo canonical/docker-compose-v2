@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/builder/remotecontext/git"
-	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/pools"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/stringid"
+	"github.com/moby/go-archive"
+	"github.com/moby/go-archive/compression"
 	"github.com/moby/patternmatcher"
 	"github.com/pkg/errors"
 )
@@ -164,7 +164,7 @@ func GetContextFromReader(rc io.ReadCloser, dockerfileName string) (out io.ReadC
 		return nil, "", err
 	}
 
-	tarArchive, err := archive.Tar(dockerfileDir, archive.Uncompressed)
+	tarArchive, err := archive.Tar(dockerfileDir, compression.None)
 	if err != nil {
 		return nil, "", err
 	}
@@ -179,8 +179,7 @@ func GetContextFromReader(rc io.ReadCloser, dockerfileName string) (out io.ReadC
 // IsArchive checks for the magic bytes of a tar or any supported compression
 // algorithm.
 func IsArchive(header []byte) bool {
-	compression := archive.DetectCompression(header)
-	if compression != archive.Uncompressed {
+	if compression.Detect(header) != compression.None {
 		return true
 	}
 	r := tar.NewReader(bytes.NewBuffer(header))
@@ -428,13 +427,13 @@ func Compress(buildCtx io.ReadCloser) (io.ReadCloser, error) {
 	pipeReader, pipeWriter := io.Pipe()
 
 	go func() {
-		compressWriter, err := archive.CompressStream(pipeWriter, archive.Gzip)
+		compressWriter, err := compression.CompressStream(pipeWriter, archive.Gzip)
 		if err != nil {
 			pipeWriter.CloseWithError(err)
 		}
 		defer buildCtx.Close()
 
-		if _, err := pools.Copy(compressWriter, buildCtx); err != nil {
+		if _, err := io.Copy(compressWriter, buildCtx); err != nil {
 			pipeWriter.CloseWithError(errors.Wrap(err, "failed to compress context"))
 			compressWriter.Close()
 			return

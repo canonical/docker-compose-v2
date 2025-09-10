@@ -27,9 +27,9 @@ import (
 )
 
 // checkConsistency validate a compose model is consistent
-func checkConsistency(project *types.Project) error {
+func checkConsistency(project *types.Project) error { //nolint:gocyclo
 	for name, s := range project.Services {
-		if s.Build == nil && s.Image == "" {
+		if s.Build == nil && s.Image == "" && s.Provider == nil {
 			return fmt.Errorf("service %q has neither an image nor a build context specified: %w", s.Name, errdefs.ErrInvalid)
 		}
 
@@ -131,6 +131,13 @@ func checkConsistency(project *types.Project) error {
 			s.Deploy.Replicas = s.Scale
 		}
 
+		if s.Scale != nil && *s.Scale < 0 {
+			return fmt.Errorf("services.%s.scale: must be greater than or equal to 0", s.Name)
+		}
+		if s.Deploy != nil && s.Deploy.Replicas != nil && *s.Deploy.Replicas < 0 {
+			return fmt.Errorf("services.%s.deploy.replicas: must be greater than or equal to 0", s.Name)
+		}
+
 		if s.CPUS != 0 && s.Deploy != nil {
 			if s.Deploy.Resources.Limits != nil && s.Deploy.Resources.Limits.NanoCPUs.Value() != s.CPUS {
 				return fmt.Errorf("services.%s: can't set distinct values on 'cpus' and 'deploy.resources.limits.cpus': %w",
@@ -171,8 +178,25 @@ func checkConsistency(project *types.Project) error {
 					return fmt.Errorf("services.%s.develop.watch: target is required for non-rebuild actions: %w", s.Name, errdefs.ErrInvalid)
 				}
 			}
-
 		}
+
+		mounts := map[string]string{}
+		for i, tmpfs := range s.Tmpfs {
+			loc := fmt.Sprintf("services.%s.tmpfs[%d]", s.Name, i)
+			path, _, _ := strings.Cut(tmpfs, ":")
+			if p, ok := mounts[path]; ok {
+				return fmt.Errorf("%s: target %s already mounted as %s", loc, path, p)
+			}
+			mounts[path] = loc
+		}
+		for i, volume := range s.Volumes {
+			loc := fmt.Sprintf("services.%s.volumes[%d]", s.Name, i)
+			if p, ok := mounts[volume.Target]; ok {
+				return fmt.Errorf("%s: target %s already mounted as %s", loc, volume.Target, p)
+			}
+			mounts[volume.Target] = loc
+		}
+
 	}
 
 	for name, secret := range project.Secrets {

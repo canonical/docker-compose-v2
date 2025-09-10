@@ -237,6 +237,11 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 					opt.Exports[i].Output = func(_ map[string]string) (io.WriteCloser, error) {
 						return w, nil
 					}
+					// if docker is using the containerd snapshotter, prefer to export the image digest
+					// (rather than the image config digest). See https://github.com/moby/moby/issues/45458.
+					if features[dockerutil.OCIImporter] {
+						opt.Exports[i].Attrs["prefer-image-digest"] = "true"
+					}
 				}
 			} else if !nodeDriver.Features(ctx)[driver.DockerExporter] {
 				return nil, nil, notSupported(driver.DockerExporter, nodeDriver, "https://docs.docker.com/go/build-exporters/")
@@ -318,7 +323,7 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 	switch opt.NetworkMode {
 	case "host":
 		so.FrontendAttrs["force-network-mode"] = opt.NetworkMode
-		so.AllowedEntitlements = append(so.AllowedEntitlements, entitlements.EntitlementNetworkHost)
+		so.AllowedEntitlements = append(so.AllowedEntitlements, entitlements.EntitlementNetworkHost.String())
 	case "none":
 		so.FrontendAttrs["force-network-mode"] = opt.NetworkMode
 	case "", "default":
@@ -389,7 +394,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 		if err != nil && err != io.EOF {
 			return nil, errors.Wrap(err, "failed to peek context header from STDIN")
 		}
-		if !(err == io.EOF && len(magic) == 0) {
+		if err != io.EOF || len(magic) != 0 {
 			if isArchive(magic) {
 				// stdin is context
 				up := uploadprovider.New()
@@ -498,8 +503,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 		}
 
 		// handle OCI layout
-		if strings.HasPrefix(v.Path, "oci-layout://") {
-			localPath := strings.TrimPrefix(v.Path, "oci-layout://")
+		if localPath, ok := strings.CutPrefix(v.Path, "oci-layout://"); ok {
 			localPath, dig, hasDigest := strings.Cut(localPath, "@")
 			localPath, tag, hasTag := strings.Cut(localPath, ":")
 			if !hasTag {

@@ -8,9 +8,9 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
+	"github.com/docker/cli/internal/jsonstream"
 	dockeropts "github.com/docker/cli/opts"
 	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/spf13/cobra"
 )
 
@@ -82,7 +82,7 @@ func runImport(ctx context.Context, dockerCli command.Cli, options importOptions
 
 	responseBody, err := dockerCli.Client().ImageImport(ctx, source, options.reference, image.ImportOptions{
 		Message:  options.message,
-		Changes:  options.changes.GetAll(),
+		Changes:  options.changes.GetSlice(),
 		Platform: options.platform,
 	})
 	if err != nil {
@@ -90,5 +90,5 @@ func runImport(ctx context.Context, dockerCli command.Cli, options importOptions
 	}
 	defer responseBody.Close()
 
-	return jsonmessage.DisplayJSONMessagesToStream(responseBody, dockerCli.Out(), nil)
+	return jsonstream.Display(ctx, responseBody, dockerCli.Out())
 }

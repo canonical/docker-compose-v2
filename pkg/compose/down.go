@@ -23,16 +23,14 @@ import (
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
-	"github.com/docker/compose/v2/internal/desktop"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/compose/v2/pkg/utils"
-	moby "github.com/docker/docker/api/types"
 	containerType "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	imageapi "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/errdefs"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -84,8 +82,11 @@ func (s *composeService) down(ctx context.Context, projectName string, options a
 	}
 
 	err = InReverseDependencyOrder(ctx, project, func(c context.Context, service string) error {
-		serviceContainers := containers.filter(isService(service))
 		serv := project.Services[service]
+		if serv.Provider != nil {
+			return s.runPlugin(ctx, project, serv, "down")
+		}
+		serviceContainers := containers.filter(isService(service))
 		err := s.removeContainers(ctx, serviceContainers, &serv, options.Timeout, options.Volumes)
 		return err
 	}, WithRootNodesAndDown(options.Services))
@@ -155,13 +156,6 @@ func (s *composeService) ensureVolumesDown(ctx context.Context, project *types.P
 		})
 	}
 
-	if s.manageDesktopFileSharesEnabled(ctx) {
-		ops = append(ops, func() error {
-			desktop.RemoveFileSharesForProject(ctx, s.desktopCli, project.Name)
-			return nil
-		})
-	}
-
 	return ops
 }
 
@@ -225,7 +219,7 @@ func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName s
 			continue
 		}
 		nw, err := s.apiClient().NetworkInspect(ctx, net.ID, network.InspectOptions{})
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			w.Event(progress.NewEvent(eventName, progress.Warning, "No resource found to remove"))
 			return nil
 		}
@@ -239,7 +233,7 @@ func (s *composeService) removeNetwork(ctx context.Context, composeNetworkName s
 		}
 
 		if err := s.apiClient().NetworkRemove(ctx, net.ID); err != nil {
-			if errdefs.IsNotFound(err) {
+			if cerrdefs.IsNotFound(err) {
 				continue
 			}
 			w.Event(progress.ErrorEvent(eventName))
@@ -267,11 +261,11 @@ func (s *composeService) removeImage(ctx context.Context, image string, w progre
 		w.Event(progress.NewEvent(id, progress.Done, "Removed"))
 		return nil
 	}
-	if errdefs.IsConflict(err) {
+	if cerrdefs.IsConflict(err) {
 		w.Event(progress.NewEvent(id, progress.Warning, "Resource is still in use"))
 		return nil
 	}
-	if errdefs.IsNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		w.Event(progress.NewEvent(id, progress.Done, "Warning: No resource found to remove"))
 		return nil
 	}
@@ -280,30 +274,37 @@ func (s *composeService) removeImage(ctx context.Context, image string, w progre
 
 func (s *composeService) removeVolume(ctx context.Context, id string, w progress.Writer) error {
 	resource := fmt.Sprintf("Volume %s", id)
+
+	_, err := s.apiClient().VolumeInspect(ctx, id)
+	if cerrdefs.IsNotFound(err) {
+		// Already gone
+		return nil
+	}
+
 	w.Event(progress.NewEvent(resource, progress.Working, "Removing"))
-	err := s.apiClient().VolumeRemove(ctx, id, true)
+	err = s.apiClient().VolumeRemove(ctx, id, true)
 	if err == nil {
 		w.Event(progress.NewEvent(resource, progress.Done, "Removed"))
 		return nil
 	}
-	if errdefs.IsConflict(err) {
+	if cerrdefs.IsConflict(err) {
 		w.Event(progress.NewEvent(resource, progress.Warning, "Resource is still in use"))
 		return nil
 	}
-	if errdefs.IsNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		w.Event(progress.NewEvent(resource, progress.Done, "Warning: No resource found to remove"))
 		return nil
 	}
 	return err
 }
 
-func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, service *types.ServiceConfig, container moby.Container, timeout *time.Duration) error {
-	eventName := getContainerProgressName(container)
+func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, service *types.ServiceConfig, ctr containerType.Summary, timeout *time.Duration) error {
+	eventName := getContainerProgressName(ctr)
 	w.Event(progress.StoppingEvent(eventName))
 
 	if service != nil {
 		for _, hook := range service.PreStop {
-			err := s.runHook(ctx, container, *service, hook, nil)
+			err := s.runHook(ctx, ctr, *service, hook, nil)
 			if err != nil {
 				return err
 			}
@@ -311,7 +312,7 @@ func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, s
 	}
 
 	timeoutInSecond := utils.DurationSecondToInt(timeout)
-	err := s.apiClient().ContainerStop(ctx, container.ID, containerType.StopOptions{Timeout: timeoutInSecond})
+	err := s.apiClient().ContainerStop(ctx, ctr.ID, containerType.StopOptions{Timeout: timeoutInSecond})
 	if err != nil {
 		w.Event(progress.ErrorMessageEvent(eventName, "Error while Stopping"))
 		return err
@@ -320,7 +321,7 @@ func (s *composeService) stopContainer(ctx context.Context, w progress.Writer, s
 	return nil
 }
 
-func (s *composeService) stopContainers(ctx context.Context, w progress.Writer, serv *types.ServiceConfig, containers []moby.Container, timeout *time.Duration) error {
+func (s *composeService) stopContainers(ctx context.Context, w progress.Writer, serv *types.ServiceConfig, containers []containerType.Summary, timeout *time.Duration) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, ctr := range containers {
 		eg.Go(func() error {
@@ -330,7 +331,7 @@ func (s *composeService) stopContainers(ctx context.Context, w progress.Writer, 
 	return eg.Wait()
 }
 
-func (s *composeService) removeContainers(ctx context.Context, containers []moby.Container, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
+func (s *composeService) removeContainers(ctx context.Context, containers []containerType.Summary, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
 	eg, _ := errgroup.WithContext(ctx)
 	for _, ctr := range containers {
 		eg.Go(func() error {
@@ -340,11 +341,11 @@ func (s *composeService) removeContainers(ctx context.Context, containers []moby
 	return eg.Wait()
 }
 
-func (s *composeService) stopAndRemoveContainer(ctx context.Context, container moby.Container, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
+func (s *composeService) stopAndRemoveContainer(ctx context.Context, ctr containerType.Summary, service *types.ServiceConfig, timeout *time.Duration, volumes bool) error {
 	w := progress.ContextWriter(ctx)
-	eventName := getContainerProgressName(container)
-	err := s.stopContainer(ctx, w, service, container, timeout)
-	if errdefs.IsNotFound(err) {
+	eventName := getContainerProgressName(ctr)
+	err := s.stopContainer(ctx, w, service, ctr, timeout)
+	if cerrdefs.IsNotFound(err) {
 		w.Event(progress.RemovedEvent(eventName))
 		return nil
 	}
@@ -352,11 +353,11 @@ func (s *composeService) stopAndRemoveContainer(ctx context.Context, container m
 		return err
 	}
 	w.Event(progress.RemovingEvent(eventName))
-	err = s.apiClient().ContainerRemove(ctx, container.ID, containerType.RemoveOptions{
+	err = s.apiClient().ContainerRemove(ctx, ctr.ID, containerType.RemoveOptions{
 		Force:         true,
 		RemoveVolumes: volumes,
 	})
-	if err != nil && !errdefs.IsNotFound(err) && !errdefs.IsConflict(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
 		w.Event(progress.ErrorMessageEvent(eventName, "Error while Removing"))
 		return err
 	}

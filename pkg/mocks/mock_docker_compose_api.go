@@ -5,7 +5,6 @@
 //
 //	mockgen -destination pkg/mocks/mock_docker_compose_api.go -package mocks -source=./pkg/api/api.go Service
 //
-
 // Package mocks is a generated GoMock package.
 package mocks
 
@@ -199,10 +198,10 @@ func (mr *MockServiceMockRecorder) Generate(ctx, options any) *gomock.Call {
 }
 
 // Images mocks base method.
-func (m *MockService) Images(ctx context.Context, projectName string, options api.ImagesOptions) ([]api.ImageSummary, error) {
+func (m *MockService) Images(ctx context.Context, projectName string, options api.ImagesOptions) (map[string]api.ImageSummary, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Images", ctx, projectName, options)
-	ret0, _ := ret[0].([]api.ImageSummary)
+	ret0, _ := ret[0].(map[string]api.ImageSummary)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -514,17 +513,17 @@ func (mr *MockServiceMockRecorder) Wait(ctx, projectName, options any) *gomock.C
 }
 
 // Watch mocks base method.
-func (m *MockService) Watch(ctx context.Context, project *types.Project, services []string, options api.WatchOptions) error {
+func (m *MockService) Watch(ctx context.Context, project *types.Project, options api.WatchOptions) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Watch", ctx, project, services, options)
+	ret := m.ctrl.Call(m, "Watch", ctx, project, options)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Watch indicates an expected call of Watch.
-func (mr *MockServiceMockRecorder) Watch(ctx, project, services, options any) *gomock.Call {
+func (mr *MockServiceMockRecorder) Watch(ctx, project, options any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Watch", reflect.TypeOf((*MockService)(nil).Watch), ctx, project, services, options)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Watch", reflect.TypeOf((*MockService)(nil).Watch), ctx, project, options)
 }
 
 // MockLogConsumer is a mock of LogConsumer interface.

@@ -2,6 +2,7 @@ package pb
 
 import (
 	"io"
+	"maps"
 	"os"
 	"strconv"
 
@@ -9,6 +10,12 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/pkg/errors"
 )
+
+type ExportEntry struct {
+	Type        string
+	Attrs       map[string]string
+	Destination string
+}
 
 func CreateExports(entries []*ExportEntry) ([]client.ExportEntry, []string, error) {
 	var outs []client.ExportEntry
@@ -26,9 +33,7 @@ func CreateExports(entries []*ExportEntry) ([]client.ExportEntry, []string, erro
 			Type:  entry.Type,
 			Attrs: map[string]string{},
 		}
-		for k, v := range entry.Attrs {
-			out.Attrs[k] = v
-		}
+		maps.Copy(out.Attrs, entry.Attrs)
 
 		supportFile := false
 		supportDir := false

@@ -34,7 +34,10 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const OCI_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_OCI_REMOTE"
+const (
+	OCI_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_OCI_REMOTE"
+	OciPrefix          = "oci://"
+)
 
 func ociRemoteLoaderEnabled() (bool, error) {
 	if v := os.Getenv(OCI_REMOTE_ENABLED); v != "" {
@@ -44,7 +47,7 @@ func ociRemoteLoaderEnabled() (bool, error) {
 		}
 		return enabled, err
 	}
-	return false, nil
+	return true, nil
 }
 
 func NewOCIRemoteLoader(dockerCli command.Cli, offline bool) loader.ResourceLoader {
@@ -61,10 +64,8 @@ type ociRemoteLoader struct {
 	known     map[string]string
 }
 
-const prefix = "oci://"
-
 func (g ociRemoteLoader) Accept(path string) bool {
-	return strings.HasPrefix(path, prefix)
+	return strings.HasPrefix(path, OciPrefix)
 }
 
 func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) {
@@ -73,7 +74,7 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		return "", err
 	}
 	if !enabled {
-		return "", fmt.Errorf("experimental OCI remote resource is disabled. %q must be set", OCI_REMOTE_ENABLED)
+		return "", fmt.Errorf("OCI remote resource is disabled by %q", OCI_REMOTE_ENABLED)
 	}
 
 	if g.offline {
@@ -82,7 +83,7 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 
 	local, ok := g.known[path]
 	if !ok {
-		ref, err := reference.ParseDockerRef(path[len(prefix):])
+		ref, err := reference.ParseDockerRef(path[len(OciPrefix):])
 		if err != nil {
 			return "", err
 		}
@@ -104,7 +105,6 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		}
 
 		local = filepath.Join(cache, descriptor.Digest.Hex())
-		composeFile := filepath.Join(local, "compose.yaml")
 		if _, err = os.Stat(local); os.IsNotExist(err) {
 			var manifest v1.Manifest
 			err = json.Unmarshal(content, &manifest)
@@ -112,16 +112,15 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 				return "", err
 			}
 
-			err2 := g.pullComposeFiles(ctx, local, composeFile, manifest, ref, resolver)
-			if err2 != nil {
+			err = g.pullComposeFiles(ctx, local, manifest, ref, resolver)
+			if err != nil {
 				// we need to clean up the directory to be sure we won't let empty files present
 				_ = os.RemoveAll(local)
-				return "", err2
+				return "", err
 			}
 		}
 		g.known[path] = local
 	}
-
 	return filepath.Join(local, "compose.yaml"), nil
 }
 
@@ -129,12 +128,12 @@ func (g ociRemoteLoader) Dir(path string) string {
 	return g.known[path]
 }
 
-func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, composeFile string, manifest v1.Manifest, ref reference.Named, resolver *imagetools.Resolver) error {
+func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, manifest v1.Manifest, ref reference.Named, resolver *imagetools.Resolver) error { //nolint:gocyclo
 	err := os.MkdirAll(local, 0o700)
 	if err != nil {
 		return err
 	}
-
+	composeFile := filepath.Join(local, "compose.yaml")
 	f, err := os.Create(composeFile)
 	if err != nil {
 		return err
@@ -157,7 +156,15 @@ func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, com
 
 		switch layer.MediaType {
 		case ocipush.ComposeYAMLMediaType:
-			if err := writeComposeFile(layer, i, f, content); err != nil {
+			target := f
+			_, extends := layer.Annotations["com.docker.compose.extends"]
+			if extends {
+				target, err = os.Create(filepath.Join(local, layer.Annotations["com.docker.compose.file"]))
+				if err != nil {
+					return err
+				}
+			}
+			if err := writeComposeFile(layer, i, target, content); err != nil {
 				return err
 			}
 		case ocipush.ComposeEnvFileMediaType:

@@ -59,7 +59,7 @@ func watchCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service)
 	}
 
 	cmd.Flags().BoolVar(&buildOpts.quiet, "quiet", false, "hide build output")
-	cmd.Flags().BoolVar(&watchOpts.prune, "prune", false, "Prune dangling images on rebuild")
+	cmd.Flags().BoolVar(&watchOpts.prune, "prune", true, "Prune dangling images on rebuild")
 	cmd.Flags().BoolVar(&watchOpts.noUp, "no-up", false, "Do not build & start services before watching")
 	return cmd
 }
@@ -117,9 +117,10 @@ func runWatch(ctx context.Context, dockerCli command.Cli, backend api.Service, w
 	}
 
 	consumer := formatter.NewLogConsumer(ctx, dockerCli.Out(), dockerCli.Err(), false, false, false)
-	return backend.Watch(ctx, project, services, api.WatchOptions{
-		Build: &build,
-		LogTo: consumer,
-		Prune: watchOpts.prune,
+	return backend.Watch(ctx, project, api.WatchOptions{
+		Build:    &build,
+		LogTo:    consumer,
+		Prune:    watchOpts.prune,
+		Services: services,
 	})
 }

@@ -32,10 +32,11 @@ type Node struct {
 	Err         error
 
 	// worker settings
-	IDs       []string
-	Platforms []ocispecs.Platform
-	GCPolicy  []client.PruneInfo
-	Labels    map[string]string
+	IDs        []string
+	Platforms  []ocispecs.Platform
+	GCPolicy   []client.PruneInfo
+	Labels     map[string]string
+	CDIDevices []client.CDIDevice
 }
 
 // Nodes returns nodes for this builder.
@@ -168,7 +169,7 @@ func (b *Builder) LoadNodes(ctx context.Context, opts ...LoadNodesOption) (_ []N
 				// dynamic nodes are used in Kubernetes driver.
 				// Kubernetes' pods are dynamically mapped to BuildKit Nodes.
 				if di.DriverInfo != nil && len(di.DriverInfo.DynamicNodes) > 0 {
-					for i := 0; i < len(di.DriverInfo.DynamicNodes); i++ {
+					for i := range di.DriverInfo.DynamicNodes {
 						diClone := di
 						if pl := di.DriverInfo.DynamicNodes[i].Platforms; len(pl) > 0 {
 							diClone.Platforms = pl
@@ -182,7 +183,7 @@ func (b *Builder) LoadNodes(ctx context.Context, opts ...LoadNodesOption) (_ []N
 			// not append (remove the static nodes in the store)
 			b.NodeGroup.Nodes = dynamicNodes
 			b.nodes = nodes
-			b.NodeGroup.Dynamic = true
+			b.Dynamic = true
 		}
 	}
 
@@ -259,6 +260,7 @@ func (n *Node) loadData(ctx context.Context, clientOpt ...client.ClientOpt) erro
 				n.GCPolicy = w.GCPolicy
 				n.Labels = w.Labels
 			}
+			n.CDIDevices = w.CDIDevices
 		}
 		sort.Strings(n.IDs)
 		n.Platforms = platformutil.Dedupe(n.Platforms)

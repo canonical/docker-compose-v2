@@ -27,7 +27,6 @@ import (
 	"github.com/docker/cli/cli/command"
 	cliopts "github.com/docker/cli/opts"
 	ui "github.com/docker/compose/v2/pkg/progress"
-	buildkit "github.com/moby/buildkit/util/progress/progressui"
 	"github.com/spf13/cobra"
 
 	"github.com/docker/compose/v2/pkg/api"
@@ -35,15 +34,18 @@ import (
 
 type buildOptions struct {
 	*ProjectOptions
-	quiet   bool
-	pull    bool
-	push    bool
-	args    []string
-	noCache bool
-	memory  cliopts.MemBytes
-	ssh     string
-	builder string
-	deps    bool
+	quiet      bool
+	pull       bool
+	push       bool
+	args       []string
+	noCache    bool
+	memory     cliopts.MemBytes
+	ssh        string
+	builder    string
+	deps       bool
+	print      bool
+	check      bool
+	provenance bool
 }
 
 func (opts buildOptions) toAPIBuildOptions(services []string) (api.BuildOptions, error) {
@@ -67,17 +69,22 @@ func (opts buildOptions) toAPIBuildOptions(services []string) (api.BuildOptions,
 	if uiMode == ui.ModeJSON {
 		uiMode = "rawjson"
 	}
+
 	return api.BuildOptions{
-		Pull:     opts.pull,
-		Push:     opts.push,
-		Progress: uiMode,
-		Args:     types.NewMappingWithEquals(opts.args),
-		NoCache:  opts.noCache,
-		Quiet:    opts.quiet,
-		Services: services,
-		Deps:     opts.deps,
-		SSHs:     SSHKeys,
-		Builder:  builderName,
+		Pull:       opts.pull,
+		Push:       opts.push,
+		Progress:   uiMode,
+		Args:       types.NewMappingWithEquals(opts.args),
+		NoCache:    opts.noCache,
+		Quiet:      opts.quiet,
+		Services:   services,
+		Deps:       opts.deps,
+		Memory:     int64(opts.memory),
+		Print:      opts.print,
+		Check:      opts.check,
+		SSHs:       SSHKeys,
+		Builder:    builderName,
+		Provenance: opts.provenance,
 	}, nil
 }
 
@@ -129,14 +136,16 @@ func buildCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service)
 	flags.Bool("no-rm", false, "Do not remove intermediate containers after a successful build. DEPRECATED")
 	flags.MarkHidden("no-rm") //nolint:errcheck
 	flags.VarP(&opts.memory, "memory", "m", "Set memory limit for the build container. Not supported by BuildKit.")
-	flags.StringVar(&p.Progress, "progress", string(buildkit.AutoMode), fmt.Sprintf(`Set type of ui output (%s)`, strings.Join(printerModes, ", ")))
+	flags.StringVar(&p.Progress, "progress", "", fmt.Sprintf(`Set type of ui output (%s)`, strings.Join(printerModes, ", ")))
 	flags.MarkHidden("progress") //nolint:errcheck
+	flags.BoolVar(&opts.print, "print", false, "Print equivalent bake file")
+	flags.BoolVar(&opts.check, "check", false, "Check build configuration")
 
 	return cmd
 }
 
 func runBuild(ctx context.Context, dockerCli command.Cli, backend api.Service, opts buildOptions, services []string) error {
-	project, _, err := opts.ToProject(ctx, dockerCli, services, cli.WithResolvedPaths(true), cli.WithoutEnvironmentResolution)
+	project, _, err := opts.ToProject(ctx, dockerCli, nil, cli.WithResolvedPaths(true), cli.WithoutEnvironmentResolution)
 	if err != nil {
 		return err
 	}
@@ -146,10 +155,10 @@ func runBuild(ctx context.Context, dockerCli command.Cli, backend api.Service, o
 	}
 
 	apiBuildOptions, err := opts.toAPIBuildOptions(services)
+	apiBuildOptions.Provenance = true
 	if err != nil {
 		return err
 	}
 
-	apiBuildOptions.Memory = int64(opts.memory)
 	return backend.Build(ctx, project, apiBuildOptions)
 }

@@ -32,8 +32,8 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 
-	moby "github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/api/types/container"
+	"github.com/moby/go-archive"
 )
 
 type archiveEntry struct {
@@ -43,7 +43,7 @@ type archiveEntry struct {
 }
 
 type LowLevelClient interface {
-	ContainersForService(ctx context.Context, projectName string, serviceName string) ([]moby.Container, error)
+	ContainersForService(ctx context.Context, projectName string, serviceName string) ([]container.Summary, error)
 
 	Exec(ctx context.Context, containerID string, cmd []string, in io.Reader) error
 	Untar(ctx context.Context, id string, reader io.ReadCloser) error

@@ -19,12 +19,13 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/containerd/platforms"
 	"github.com/docker/cli/opts"
-	"github.com/docker/compose/v2/pkg/utils"
 )
 
 // Service manages a compose project
@@ -78,13 +79,13 @@ type Service interface {
 	// Publish executes the equivalent to a `compose publish`
 	Publish(ctx context.Context, project *types.Project, repository string, options PublishOptions) error
 	// Images executes the equivalent of a `compose images`
-	Images(ctx context.Context, projectName string, options ImagesOptions) ([]ImageSummary, error)
+	Images(ctx context.Context, projectName string, options ImagesOptions) (map[string]ImageSummary, error)
 	// MaxConcurrency defines upper limit for concurrent operations against engine API
 	MaxConcurrency(parallel int)
 	// DryRunMode defines if dry run applies to the command
 	DryRunMode(ctx context.Context, dryRun bool) (context.Context, error)
 	// Watch services' development context and sync/notify/rebuild/restart on changes
-	Watch(ctx context.Context, project *types.Project, services []string, options WatchOptions) error
+	Watch(ctx context.Context, project *types.Project, options WatchOptions) error
 	// Viz generates a graphviz graph of the project services
 	Viz(ctx context.Context, project *types.Project, options VizOptions) (string, error)
 	// Wait blocks until at least one of the services' container exits
@@ -126,9 +127,10 @@ const WatchLogger = "#watch"
 
 // WatchOptions group options of the Watch API
 type WatchOptions struct {
-	Build *BuildOptions
-	LogTo LogConsumer
-	Prune bool
+	Build    *BuildOptions
+	LogTo    LogConsumer
+	Prune    bool
+	Services []string
 }
 
 // BuildOptions group options of the Build API
@@ -155,13 +157,19 @@ type BuildOptions struct {
 	Memory int64
 	// Builder name passed in the command line
 	Builder string
+	// Print don't actually run builder but print equivalent build config
+	Print bool
+	// Check let builder validate build configuration
+	Check bool
+	// Provenance
+	Provenance bool
 }
 
 // Apply mutates project according to build options
 func (o BuildOptions) Apply(project *types.Project) error {
 	platform := project.Environment["DOCKER_DEFAULT_PLATFORM"]
 	for name, service := range project.Services {
-		if service.Image == "" && service.Build == nil {
+		if service.Provider == nil && service.Image == "" && service.Build == nil {
 			return fmt.Errorf("invalid service %q. Must specify either image or build", name)
 		}
 
@@ -169,13 +177,13 @@ func (o BuildOptions) Apply(project *types.Project) error {
 			continue
 		}
 		if platform != "" {
-			if len(service.Build.Platforms) > 0 && !utils.StringContains(service.Build.Platforms, platform) {
+			if len(service.Build.Platforms) > 0 && !slices.Contains(service.Build.Platforms, platform) {
 				return fmt.Errorf("service %q build.platforms does not support value set by DOCKER_DEFAULT_PLATFORM: %s", name, platform)
 			}
 			service.Platform = platform
 		}
 		if service.Platform != "" {
-			if len(service.Build.Platforms) > 0 && !utils.StringContains(service.Build.Platforms, service.Platform) {
+			if len(service.Build.Platforms) > 0 && !slices.Contains(service.Build.Platforms, service.Platform) {
 				return fmt.Errorf("service %q build configuration does not support platform: %s", name, service.Platform)
 			}
 		}
@@ -523,15 +531,18 @@ type ContainerProcSummary struct {
 	Name      string
 	Processes [][]string
 	Titles    []string
+	Service   string
+	Replica   string
 }
 
 // ImageSummary holds container image description
 type ImageSummary struct {
-	ID            string
-	ContainerName string
-	Repository    string
-	Tag           string
-	Size          int64
+	ID          string
+	Repository  string
+	Tag         string
+	Platform    platforms.Platform
+	Size        int64
+	LastTagTime time.Time
 }
 
 // ServiceStatus hold status about a service

@@ -1,20 +1,24 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.23
+
 package image
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/containerd/platforms"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/cli/cli/streams"
+	"github.com/docker/cli/internal/tui"
 	"github.com/docker/docker/api/types/filters"
 	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
 	"github.com/morikuni/aec"
+	"github.com/opencontainers/go-digest"
 )
 
 type treeOptions struct {
@@ -38,10 +42,15 @@ func runTree(ctx context.Context, dockerCLI command.Cli, opts treeOptions) error
 	if err != nil {
 		return err
 	}
+	if !opts.all {
+		images = slices.DeleteFunc(images, isDangling)
+	}
 
 	view := treeView{
 		images: make([]topImage, 0, len(images)),
 	}
+	attested := make(map[digest.Digest]bool)
+
 	for _, img := range images {
 		details := imageDetails{
 			ID:        img.ID,
@@ -52,11 +61,16 @@ func runTree(ctx context.Context, dockerCLI command.Cli, opts treeOptions) error
 		var totalContent int64
 		children := make([]subImage, 0, len(img.Manifests))
 		for _, im := range img.Manifests {
+			totalContent += im.Size.Content
+
+			if im.Kind == imagetypes.ManifestKindAttestation {
+				attested[im.AttestationData.For] = true
+				continue
+			}
 			if im.Kind != imagetypes.ManifestKindImage {
 				continue
 			}
 
-			im := im
 			sub := subImage{
 				Platform:  platforms.Format(im.ImageData.Platform),
 				Available: im.Available,
@@ -73,7 +87,6 @@ func runTree(ctx context.Context, dockerCLI command.Cli, opts treeOptions) error
 				details.InUse = true
 			}
 
-			totalContent += im.Size.Content
 			children = append(children, sub)
 
 			// Add extra spacing between images if there's at least one entry with children.
@@ -120,8 +133,59 @@ type subImage struct {
 
 const columnSpacing = 3
 
+var chipInUse = imageChip{
+	letter: "U",
+	desc:   "In Use",
+	fg:     0,
+	bg:     14,
+	check:  func(d *imageDetails) bool { return d.InUse },
+}
+
+var chipPlaceholder = tui.Str{
+	Plain: " ",
+	Fancy: "   ",
+}
+
+type imageChip struct {
+	desc   string
+	fg, bg int
+	letter string
+	check  func(*imageDetails) bool
+}
+
+func (c imageChip) String(isTerm bool) string {
+	return tui.Str{
+		Plain: c.letter,
+		Fancy: tui.Chip(c.fg, c.bg, " "+c.letter+" "),
+	}.String(isTerm)
+}
+
+var allChips = []imageChip{
+	chipInUse,
+}
+
+func getPossibleChips(view treeView) (chips []imageChip) {
+	remaining := make([]imageChip, len(allChips))
+	copy(remaining, allChips)
+
+	var possible []imageChip
+	for _, img := range view.images {
+		for _, c := range img.Children {
+			for idx := len(remaining) - 1; idx >= 0; idx-- {
+				chip := remaining[idx]
+				if chip.check(&c.Details) {
+					possible = append(possible, chip)
+					remaining = append(remaining[:idx], remaining[idx+1:]...)
+				}
+			}
+		}
+	}
+
+	return possible
+}
+
 func printImageTree(dockerCLI command.Cli, view treeView) error {
-	out := dockerCLI.Out()
+	out := tui.NewOutput(dockerCLI.Out())
 	_, width := out.GetTtySize()
 	if width == 0 {
 		width = 80
@@ -130,24 +194,17 @@ func printImageTree(dockerCLI command.Cli, view treeView) error {
 		width = 20
 	}
 
-	warningColor := aec.LightYellowF
-	headerColor := aec.NewBuilder(aec.DefaultF, aec.Bold).ANSI
-	topNameColor := aec.NewBuilder(aec.BlueF, aec.Bold).ANSI
-	normalColor := aec.NewBuilder(aec.DefaultF).ANSI
-	greenColor := aec.NewBuilder(aec.GreenF).ANSI
-	untaggedColor := aec.NewBuilder(aec.Faint).ANSI
-	if !out.IsTerminal() {
-		headerColor = noColor{}
-		topNameColor = noColor{}
-		normalColor = noColor{}
-		greenColor = noColor{}
-		warningColor = noColor{}
-		untaggedColor = noColor{}
-	}
+	topNameColor := out.Color(aec.NewBuilder(aec.BlueF, aec.Bold).ANSI)
+	normalColor := out.Color(tui.ColorSecondary)
+	untaggedColor := out.Color(tui.ColorTertiary)
+	isTerm := out.IsTerminal()
 
-	_, _ = fmt.Fprintln(out, warningColor.Apply("WARNING: This is an experimental feature. The output may change and shouldn't be depended on."))
-	_, _ = fmt.Fprintln(out, "")
+	out.PrintlnWithColor(tui.ColorWarning, "WARNING: This is an experimental feature. The output may change and shouldn't be depended on.")
 
+	out.Println(generateLegend(out, width))
+	out.Println()
+
+	possibleChips := getPossibleChips(view)
 	columns := []imgColumn{
 		{
 			Title: "Image",
@@ -179,19 +236,68 @@ func printImageTree(dockerCLI command.Cli, view treeView) error {
 			},
 		},
 		{
-			Title: "In Use",
-			Align: alignCenter,
-			Width: 6,
-			Color: &greenColor,
-			DetailsValue: func(d *imageDetails) string {
-				if d.InUse {
-					return "✔"
+			Title: "Extra",
+			Align: alignLeft,
+			Width: func() int {
+				maxChipsWidth := 0
+				for _, chip := range possibleChips {
+					s := chip.String(isTerm)
+					l := tui.Width(s)
+					maxChipsWidth += l
 				}
-				return " "
+
+				le := len("Extra")
+				if le > maxChipsWidth {
+					return le
+				}
+				return maxChipsWidth
+			}(),
+			Color: &tui.ColorNone,
+			DetailsValue: func(d *imageDetails) string {
+				var out string
+				for _, chip := range possibleChips {
+					if chip.check(d) {
+						out += chip.String(isTerm)
+					} else {
+						out += chipPlaceholder.String(isTerm)
+					}
+				}
+				return out
 			},
 		},
 	}
 
+	columns = adjustColumns(width, columns, view.images)
+
+	// Print columns
+	for i, h := range columns {
+		if i > 0 {
+			_, _ = fmt.Fprint(out, strings.Repeat(" ", columnSpacing))
+		}
+
+		_, _ = fmt.Fprint(out, h.Print(tui.ColorTitle, strings.ToUpper(h.Title)))
+	}
+	_, _ = fmt.Fprintln(out)
+
+	// Print images
+	for _, img := range view.images {
+		printNames(out, columns, img, topNameColor, untaggedColor)
+		printDetails(out, columns, normalColor, img.Details)
+
+		if len(img.Children) > 0 || view.imageSpacing {
+			_, _ = fmt.Fprintln(out)
+		}
+		printChildren(out, columns, img, normalColor)
+		_, _ = fmt.Fprintln(out)
+	}
+
+	return nil
+}
+
+// adjustColumns adjusts the width of the first column to maximize the space
+// available for image names and removes any columns that would be too narrow
+// to display their content.
+func adjustColumns(width uint, columns []imgColumn, images []topImage) []imgColumn {
 	nameWidth := int(width)
 	for idx, h := range columns {
 		if h.Width == 0 {
@@ -209,41 +315,35 @@ func printImageTree(dockerCLI command.Cli, view treeView) error {
 		nameWidth -= d
 	}
 
-	images := view.images
 	// Try to make the first column as narrow as possible
 	widest := widestFirstColumnValue(columns, images)
 	if nameWidth > widest {
 		nameWidth = widest
 	}
 	columns[0].Width = nameWidth
-
-	// Print columns
-	for i, h := range columns {
-		if i > 0 {
-			_, _ = fmt.Fprint(out, strings.Repeat(" ", columnSpacing))
-		}
-
-		_, _ = fmt.Fprint(out, h.Print(headerColor, strings.ToUpper(h.Title)))
-	}
-
-	_, _ = fmt.Fprintln(out)
-
-	// Print images
-	for _, img := range images {
-		printNames(out, columns, img, topNameColor, untaggedColor)
-		printDetails(out, columns, normalColor, img.Details)
-
-		if len(img.Children) > 0 || view.imageSpacing {
-			_, _ = fmt.Fprintln(out)
-		}
-		printChildren(out, columns, img, normalColor)
-		_, _ = fmt.Fprintln(out)
-	}
-
-	return nil
+	return columns
 }
 
-func printDetails(out *streams.Out, headers []imgColumn, defaultColor aec.ANSI, details imageDetails) {
+func generateLegend(out tui.Output, width uint) string {
+	var legend string
+	legend += out.Sprint(tui.InfoHeader)
+	for idx, chip := range allChips {
+		legend += " " + out.Sprint(chip) + " " + chip.desc
+		if idx < len(allChips)-1 {
+			legend += " |"
+		}
+	}
+	legend += " "
+
+	r := int(width) - tui.Width(legend)
+	if r < 0 {
+		r = 0
+	}
+	legend = strings.Repeat(" ", r) + legend
+	return legend
+}
+
+func printDetails(out tui.Output, headers []imgColumn, defaultColor aec.ANSI, details imageDetails) {
 	for _, h := range headers {
 		if h.DetailsValue == nil {
 			continue
@@ -259,17 +359,18 @@ func printDetails(out *streams.Out, headers []imgColumn, defaultColor aec.ANSI, 
 	}
 }
 
-func printChildren(out *streams.Out, headers []imgColumn, img topImage, normalColor aec.ANSI) {
+func printChildren(out tui.Output, headers []imgColumn, img topImage, normalColor aec.ANSI) {
 	for idx, sub := range img.Children {
 		clr := normalColor
 		if !sub.Available {
 			clr = normalColor.With(aec.Faint)
 		}
 
+		text := sub.Platform
 		if idx != len(img.Children)-1 {
-			_, _ = fmt.Fprint(out, headers[0].Print(clr, "├─ "+sub.Platform))
+			_, _ = fmt.Fprint(out, headers[0].Print(clr, "├─ "+text))
 		} else {
-			_, _ = fmt.Fprint(out, headers[0].Print(clr, "└─ "+sub.Platform))
+			_, _ = fmt.Fprint(out, headers[0].Print(clr, "└─ "+text))
 		}
 
 		printDetails(out, headers, clr, sub.Details)
@@ -277,16 +378,28 @@ func printChildren(out *streams.Out, headers []imgColumn, img topImage, normalCo
 	}
 }
 
-func printNames(out *streams.Out, headers []imgColumn, img topImage, color, untaggedColor aec.ANSI) {
+func printNames(out tui.Output, headers []imgColumn, img topImage, color, untaggedColor aec.ANSI) {
 	if len(img.Names) == 0 {
 		_, _ = fmt.Fprint(out, headers[0].Print(untaggedColor, "<untagged>"))
 	}
 
-	for nameIdx, name := range img.Names {
-		if nameIdx != 0 {
-			_, _ = fmt.Fprintln(out, "")
+	// TODO: Replace with namesLongestToShortest := slices.SortedFunc(slices.Values(img.Names))
+	// once we move to Go 1.23.
+	namesLongestToShortest := make([]string, len(img.Names))
+	copy(namesLongestToShortest, img.Names)
+	sort.Slice(namesLongestToShortest, func(i, j int) bool {
+		return len(namesLongestToShortest[i]) > len(namesLongestToShortest[j])
+	})
+
+	for nameIdx, name := range namesLongestToShortest {
+		// Don't limit first names to the column width because only the last
+		// name will be printed alongside other columns.
+		if nameIdx < len(img.Names)-1 {
+			_, fullWidth := out.GetTtySize()
+			_, _ = fmt.Fprintln(out, color.Apply(tui.Ellipsis(name, int(fullWidth))))
+		} else {
+			_, _ = fmt.Fprint(out, headers[0].Print(color, name))
 		}
-		_, _ = fmt.Fprint(out, headers[0].Print(color, name))
 	}
 }
 
@@ -307,14 +420,6 @@ type imgColumn struct {
 	Color        *aec.ANSI
 }
 
-func truncateRunes(s string, length int) string {
-	runes := []rune(s)
-	if len(runes) > length {
-		return string(runes[:length-3]) + "..."
-	}
-	return s
-}
-
 func (h imgColumn) Print(clr aec.ANSI, s string) string {
 	switch h.Align {
 	case alignCenter:
@@ -327,10 +432,10 @@ func (h imgColumn) Print(clr aec.ANSI, s string) string {
 }
 
 func (h imgColumn) PrintC(clr aec.ANSI, s string) string {
-	ln := utf8.RuneCountInString(s)
+	ln := tui.Width(s)
 
 	if ln > h.Width {
-		return clr.Apply(truncateRunes(s, h.Width))
+		return clr.Apply(tui.Ellipsis(s, h.Width))
 	}
 
 	fill := h.Width - ln
@@ -342,35 +447,21 @@ func (h imgColumn) PrintC(clr aec.ANSI, s string) string {
 }
 
 func (h imgColumn) PrintL(clr aec.ANSI, s string) string {
-	ln := utf8.RuneCountInString(s)
+	ln := tui.Width(s)
 	if ln > h.Width {
-		return clr.Apply(truncateRunes(s, h.Width))
+		return clr.Apply(tui.Ellipsis(s, h.Width))
 	}
 
 	return clr.Apply(s) + strings.Repeat(" ", h.Width-ln)
 }
 
 func (h imgColumn) PrintR(clr aec.ANSI, s string) string {
-	ln := utf8.RuneCountInString(s)
+	ln := tui.Width(s)
 	if ln > h.Width {
-		return clr.Apply(truncateRunes(s, h.Width))
+		return clr.Apply(tui.Ellipsis(s, h.Width))
 	}
 
 	return strings.Repeat(" ", h.Width-ln) + clr.Apply(s)
-}
-
-type noColor struct{}
-
-func (a noColor) With(_ ...aec.ANSI) aec.ANSI {
-	return a
-}
-
-func (a noColor) Apply(s string) string {
-	return s
-}
-
-func (a noColor) String() string {
-	return ""
 }
 
 // widestFirstColumnValue calculates the width needed to fully display the image names and platforms.
