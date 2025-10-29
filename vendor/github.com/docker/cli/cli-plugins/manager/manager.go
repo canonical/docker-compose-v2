@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,9 +10,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/containerd/errdefs"
 	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
+	"github.com/docker/cli/cli/debug"
 	"github.com/fvbommel/sortorder"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -22,13 +25,9 @@ const (
 	// used to originally invoke the docker CLI when executing a
 	// plugin. Assuming $PATH and $CWD remain unchanged this should allow
 	// the plugin to re-execute the original CLI.
-	ReexecEnvvar = metadata.ReexecEnvvar
-
-	// ResourceAttributesEnvvar is the name of the envvar that includes additional
-	// resource attributes for OTEL.
 	//
-	// Deprecated: The "OTEL_RESOURCE_ATTRIBUTES" env-var is part of the OpenTelemetry specification; users should define their own const for this. This const will be removed in the next release.
-	ResourceAttributesEnvvar = "OTEL_RESOURCE_ATTRIBUTES"
+	// Deprecated: use [metadata.ReexecEnvvar]. This alias will be removed in the next release.
+	ReexecEnvvar = metadata.ReexecEnvvar
 )
 
 // errPluginNotFound is the error returned when a plugin could not be found.
@@ -40,15 +39,11 @@ func (e errPluginNotFound) Error() string {
 	return "Error: No such CLI plugin: " + string(e)
 }
 
-type notFound interface{ NotFound() }
-
 // IsNotFound is true if the given error is due to a plugin not being found.
+//
+// Deprecated: use [errdefs.IsNotFound].
 func IsNotFound(err error) bool {
-	if e, ok := err.(*pluginError); ok {
-		err = e.Cause()
-	}
-	_, ok := err.(notFound)
-	return ok
+	return errdefs.IsNotFound(err)
 }
 
 // getPluginDirs returns the platform-specific locations to search for plugins
@@ -81,9 +76,17 @@ func addPluginCandidatesFromDir(res map[string][]string, d string) {
 		return
 	}
 	for _, dentry := range dentries {
-		switch dentry.Type() & os.ModeType { //nolint:exhaustive,nolintlint // no need to include all possible file-modes in this list
-		case 0, os.ModeSymlink:
-			// Regular file or symlink, keep going
+		switch mode := dentry.Type() & os.ModeType; mode { //nolint:exhaustive,nolintlint // no need to include all possible file-modes in this list
+		case os.ModeSymlink:
+			if !debug.IsEnabled() {
+				// Skip broken symlinks unless debug is enabled. With debug
+				// enabled, this will print a warning in "docker info".
+				if _, err := os.Stat(filepath.Join(d, dentry.Name())); errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+			}
+		case 0:
+			// Regular file, keep going
 		default:
 			// Something else, ignore.
 			continue
@@ -127,7 +130,7 @@ func getPlugin(name string, pluginDirs []string, rootcmd *cobra.Command) (*Plugi
 		if err != nil {
 			return nil, err
 		}
-		if !IsNotFound(p.Err) {
+		if !errdefs.IsNotFound(p.Err) {
 			p.ShadowedPaths = paths[1:]
 		}
 		return &p, nil
@@ -164,7 +167,7 @@ func ListPlugins(dockerCli config.Provider, rootcmd *cobra.Command) ([]Plugin, e
 				if err != nil {
 					return err
 				}
-				if !IsNotFound(p.Err) {
+				if !errdefs.IsNotFound(p.Err) {
 					p.ShadowedPaths = paths[1:]
 					mu.Lock()
 					defer mu.Unlock()
@@ -185,9 +188,9 @@ func ListPlugins(dockerCli config.Provider, rootcmd *cobra.Command) ([]Plugin, e
 	return plugins, nil
 }
 
-// PluginRunCommand returns an "os/exec".Cmd which when .Run() will execute the named plugin.
+// PluginRunCommand returns an [os/exec.Cmd] which when [os/exec.Cmd.Run] will execute the named plugin.
 // The rootcmd argument is referenced to determine the set of builtin commands in order to detect conficts.
-// The error returned satisfies the IsNotFound() predicate if no plugin was found or if the first candidate plugin was invalid somehow.
+// The error returned satisfies the [errdefs.IsNotFound] predicate if no plugin was found or if the first candidate plugin was invalid somehow.
 func PluginRunCommand(dockerCli config.Provider, name string, rootcmd *cobra.Command) (*exec.Cmd, error) {
 	// This uses the full original args, not the args which may
 	// have been provided by cobra to our caller. This is because

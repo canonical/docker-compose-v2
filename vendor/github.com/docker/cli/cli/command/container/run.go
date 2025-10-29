@@ -10,6 +10,7 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
+	"github.com/docker/cli/cli/trust"
 	"github.com/docker/cli/opts"
 	"github.com/docker/docker/api/types/container"
 	"github.com/moby/sys/signal"
@@ -28,7 +29,13 @@ type runOptions struct {
 }
 
 // NewRunCommand create a new `docker run` command
-func NewRunCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewRunCommand(dockerCLI command.Cli) *cobra.Command {
+	return newRunCommand(dockerCLI)
+}
+
+func newRunCommand(dockerCLI command.Cli) *cobra.Command {
 	var options runOptions
 	var copts *containerOptions
 
@@ -41,9 +48,9 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 			if len(args) > 1 {
 				copts.Args = args[1:]
 			}
-			return runRun(cmd.Context(), dockerCli, cmd.Flags(), &options, copts)
+			return runRun(cmd.Context(), dockerCLI, cmd.Flags(), &options, copts)
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli, 1),
+		ValidArgsFunction: completion.ImageNames(dockerCLI, 1),
 		Annotations: map[string]string{
 			"category-top": "1",
 			"aliases":      "docker container run, docker run",
@@ -66,18 +73,19 @@ func NewRunCommand(dockerCli command.Cli) *cobra.Command {
 	// with hostname
 	flags.Bool("help", false, "Print usage")
 
-	command.AddPlatformFlag(flags, &options.platform)
-	command.AddTrustVerificationFlags(flags, &options.untrusted, dockerCli.ContentTrustEnabled())
+	// TODO(thaJeztah): consider adding platform as "image create option" on containerOptions
+	addPlatformFlag(flags, &options.platform)
+	flags.BoolVar(&options.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image verification")
 	copts = addFlags(flags)
 
 	_ = cmd.RegisterFlagCompletionFunc("detach-keys", completeDetachKeys)
-	addCompletions(cmd, dockerCli)
+	addCompletions(cmd, dockerCLI)
 
 	flags.VisitAll(func(flag *pflag.Flag) {
 		// Set a default completion function if none was set. We don't look
 		// up if it does already have one set, because Cobra does this for
 		// us, and returns an error (which we ignore for this reason).
-		_ = cmd.RegisterFlagCompletionFunc(flag.Name, completion.NoComplete)
+		_ = cmd.RegisterFlagCompletionFunc(flag.Name, cobra.NoFileCompletions)
 	})
 
 	return cmd

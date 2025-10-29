@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/distribution/reference"
@@ -28,7 +27,6 @@ import (
 	buildtypes "github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	registrytypes "github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/builder/remotecontext/urlutil"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/moby/go-archive"
@@ -76,12 +74,6 @@ func (o buildOptions) dockerfileFromStdin() bool {
 	return o.dockerfileName == "-"
 }
 
-// contextFromStdin returns true when the user specified that the build context
-// should be read from stdin
-func (o buildOptions) contextFromStdin() bool {
-	return o.context == "-"
-}
-
 func newBuildOptions() buildOptions {
 	ulimits := make(map[string]*container.Ulimit)
 	return buildOptions{
@@ -94,7 +86,14 @@ func newBuildOptions() buildOptions {
 }
 
 // NewBuildCommand creates a new `docker build` command
-func NewBuildCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewBuildCommand(dockerCLI command.Cli) *cobra.Command {
+	return newBuildCommand(dockerCLI)
+}
+
+// newBuildCommand creates a new `docker build` command
+func newBuildCommand(dockerCli command.Cli) *cobra.Command {
 	options := newBuildOptions()
 
 	cmd := &cobra.Command{
@@ -152,7 +151,7 @@ func NewBuildCommand(dockerCli command.Cli) *cobra.Command {
 	flags.SetAnnotation("target", annotation.ExternalURL, []string{"https://docs.docker.com/reference/cli/docker/buildx/build/#target"})
 	flags.StringVar(&options.imageIDFile, "iidfile", "", "Write the image ID to the file")
 
-	command.AddTrustVerificationFlags(flags, &options.untrusted, dockerCli.ContentTrustEnabled())
+	flags.BoolVar(&options.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image verification")
 
 	flags.StringVar(&options.platform, "platform", os.Getenv("DOCKER_DEFAULT_PLATFORM"), "Set platform if server is multi-platform capable")
 	flags.SetAnnotation("platform", "version", []string{"1.38"})
@@ -189,21 +188,24 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 		buildCtx      io.ReadCloser
 		dockerfileCtx io.ReadCloser
 		contextDir    string
-		tempDir       string
 		relDockerfile string
 		progBuff      io.Writer
 		buildBuff     io.Writer
 		remote        string
 	)
 
+	contextType, err := build.DetectContextType(options.context)
+	if err != nil {
+		return err
+	}
+
 	if options.dockerfileFromStdin() {
-		if options.contextFromStdin() {
+		if contextType == build.ContextTypeStdin {
 			return errors.New("invalid argument: can't use stdin for both build context and dockerfile")
 		}
 		dockerfileCtx = dockerCli.In()
 	}
 
-	specifiedContext := options.context
 	progBuff = dockerCli.Out()
 	buildBuff = dockerCli.Out()
 	if options.quiet {
@@ -217,13 +219,19 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 		}
 	}
 
-	switch {
-	case options.contextFromStdin():
+	switch contextType {
+	case build.ContextTypeStdin:
 		// buildCtx is tar archive. if stdin was dockerfile then it is wrapped
 		buildCtx, relDockerfile, err = build.GetContextFromReader(dockerCli.In(), options.dockerfileName)
-	case isLocalDir(specifiedContext):
-		contextDir, relDockerfile, err = build.GetContextFromLocalDir(specifiedContext, options.dockerfileName)
-		if err == nil && strings.HasPrefix(relDockerfile, ".."+string(filepath.Separator)) {
+		if err != nil {
+			return fmt.Errorf("unable to prepare context from STDIN: %w", err)
+		}
+	case build.ContextTypeLocal:
+		contextDir, relDockerfile, err = build.GetContextFromLocalDir(options.context, options.dockerfileName)
+		if err != nil {
+			return errors.Errorf("unable to prepare context: %s", err)
+		}
+		if strings.HasPrefix(relDockerfile, ".."+string(filepath.Separator)) {
 			// Dockerfile is outside of build-context; read the Dockerfile and pass it as dockerfileCtx
 			dockerfileCtx, err = os.Open(options.dockerfileName)
 			if err != nil {
@@ -231,24 +239,23 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 			}
 			defer dockerfileCtx.Close()
 		}
-	case urlutil.IsGitURL(specifiedContext):
-		tempDir, relDockerfile, err = build.GetContextFromGitURL(specifiedContext, options.dockerfileName)
-	case urlutil.IsURL(specifiedContext):
-		buildCtx, relDockerfile, err = build.GetContextFromURL(progBuff, specifiedContext, options.dockerfileName)
-	default:
-		return errors.Errorf("unable to prepare context: path %q not found", specifiedContext)
-	}
-
-	if err != nil {
-		if options.quiet && urlutil.IsURL(specifiedContext) {
+	case build.ContextTypeGit:
+		var tempDir string
+		tempDir, relDockerfile, err = build.GetContextFromGitURL(options.context, options.dockerfileName)
+		if err != nil {
+			return errors.Errorf("unable to prepare context: %s", err)
+		}
+		defer func() {
+			_ = os.RemoveAll(tempDir)
+		}()
+		contextDir = tempDir
+	case build.ContextTypeRemote:
+		buildCtx, relDockerfile, err = build.GetContextFromURL(progBuff, options.context, options.dockerfileName)
+		if err != nil && options.quiet {
 			_, _ = fmt.Fprintln(dockerCli.Err(), progBuff)
 		}
-		return errors.Errorf("unable to prepare context: %s", err)
-	}
-
-	if tempDir != "" {
-		defer os.RemoveAll(tempDir)
-		contextDir = tempDir
+	default:
+		return errors.Errorf("unable to prepare context: path %q not found", options.context)
 	}
 
 	// read from a directory into tar archive
@@ -333,8 +340,17 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 	configFile := dockerCli.ConfigFile()
 	creds, _ := configFile.GetAllCredentials()
 	authConfigs := make(map[string]registrytypes.AuthConfig, len(creds))
-	for k, auth := range creds {
-		authConfigs[k] = registrytypes.AuthConfig(auth)
+	for k, authConfig := range creds {
+		authConfigs[k] = registrytypes.AuthConfig{
+			Username:      authConfig.Username,
+			Password:      authConfig.Password,
+			ServerAddress: authConfig.ServerAddress,
+
+			// TODO(thaJeztah): Are these expected to be included?
+			Auth:          authConfig.Auth,
+			IdentityToken: authConfig.IdentityToken,
+			RegistryToken: authConfig.RegistryToken,
+		}
 	}
 	buildOpts := imageBuildOptions(dockerCli, options)
 	buildOpts.Version = buildtypes.BuilderV1
@@ -377,16 +393,6 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 		return err
 	}
 
-	// Windows: show error message about modified file permissions if the
-	// daemon isn't running Windows.
-	if response.OSType != "windows" && runtime.GOOS == "windows" && !options.quiet {
-		_, _ = fmt.Fprintln(dockerCli.Out(), "SECURITY WARNING: You are building a Docker "+
-			"image from Windows against a non-Windows Docker host. All files and "+
-			"directories added to build context will have '-rwxr-xr-x' permissions. "+
-			"It is recommended to double check and reset permissions for sensitive "+
-			"files and directories.")
-	}
-
 	// Everything worked so if -q was provided the output from the daemon
 	// should be just the image ID and we'll print that to stdout.
 	if options.quiet {
@@ -413,11 +419,6 @@ func runBuild(ctx context.Context, dockerCli command.Cli, options buildOptions) 
 	}
 
 	return nil
-}
-
-func isLocalDir(c string) bool {
-	_, err := os.Stat(c)
-	return err == nil
 }
 
 type translatorFunc func(context.Context, reference.NamedTagged) (reference.Canonical, error)

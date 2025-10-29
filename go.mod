@@ -15,7 +15,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/distribution/reference v0.6.0
 	github.com/docker/buildx v0.24.0
-	github.com/docker/cli v28.2.2+incompatible
+	github.com/docker/cli v28.5.1+incompatible
 	github.com/docker/cli-docs-tool v0.10.0
 	github.com/docker/docker v28.2.2+incompatible
 	github.com/docker/go-connections v0.5.0
@@ -62,7 +62,6 @@ require (
 )
 
 require (
-	dario.cat/mergo v1.0.1 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Masterminds/semver/v3 v3.2.1 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect

@@ -8,12 +8,13 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/streams"
 	"github.com/docker/cli/cli/trust"
 	"github.com/docker/cli/internal/jsonstream"
+	"github.com/docker/cli/internal/registry"
 	"github.com/docker/docker/api/types/image"
 	registrytypes "github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/registry"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -42,8 +43,18 @@ func newNotaryClient(cli command.Streams, imgRefAndAuth trust.ImageRefAndAuth) (
 }
 
 // pushTrustedReference pushes a canonical reference to the trust server.
-func pushTrustedReference(ctx context.Context, ioStreams command.Streams, repoInfo *registry.RepositoryInfo, ref reference.Named, authConfig registrytypes.AuthConfig, in io.Reader) error {
-	return trust.PushTrustedReference(ctx, ioStreams, repoInfo, ref, authConfig, in, command.UserAgent())
+func pushTrustedReference(ctx context.Context, dockerCLI command.Cli, ref reference.Named, responseBody io.Reader) error {
+	// Resolve the Repository name from fqn to RepositoryInfo, and create an
+	// IndexInfo. Docker Content Trust uses the IndexInfo.Official field to
+	// select the right domain for Docker Hub's Notary server;
+	// https://github.com/docker/cli/blob/v28.4.0/cli/trust/trust.go#L65-L79
+	indexInfo := registry.NewIndexInfo(ref)
+	repoInfo := &trust.RepositoryInfo{
+		Name:  reference.TrimNamed(ref),
+		Index: indexInfo,
+	}
+	authConfig := command.ResolveAuthConfig(dockerCLI.ConfigFile(), indexInfo)
+	return trust.PushTrustedReference(ctx, dockerCLI, repoInfo, ref, authConfig, responseBody, command.UserAgent())
 }
 
 // trustedPull handles content trust pulling of an image
@@ -65,7 +76,7 @@ func trustedPull(ctx context.Context, cli command.Cli, imgRefAndAuth trust.Image
 		if err != nil {
 			return err
 		}
-		updatedImgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, AuthResolver(cli), trustedRef.String())
+		updatedImgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, authResolver(cli), trustedRef.String())
 		if err != nil {
 			return err
 		}
@@ -149,10 +160,9 @@ func imagePullPrivileged(ctx context.Context, cli command.Cli, imgRefAndAuth tru
 	if err != nil {
 		return err
 	}
-	requestPrivilege := command.RegistryAuthenticationPrivilegedFunc(cli, imgRefAndAuth.RepoInfo().Index, "pull")
 	responseBody, err := cli.Client().ImagePull(ctx, reference.FamiliarString(imgRefAndAuth.Reference()), image.PullOptions{
 		RegistryAuth:  encodedAuth,
-		PrivilegeFunc: requestPrivilege,
+		PrivilegeFunc: nil,
 		All:           opts.all,
 		Platform:      opts.platform,
 	})
@@ -170,7 +180,7 @@ func imagePullPrivileged(ctx context.Context, cli command.Cli, imgRefAndAuth tru
 
 // TrustedReference returns the canonical trusted reference for an image reference
 func TrustedReference(ctx context.Context, cli command.Cli, ref reference.NamedTagged) (reference.Canonical, error) {
-	imgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, AuthResolver(cli), ref.String())
+	imgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, authResolver(cli), ref.String())
 	if err != nil {
 		return nil, err
 	}
@@ -208,9 +218,16 @@ func convertTarget(t client.Target) (target, error) {
 	}, nil
 }
 
-// AuthResolver returns an auth resolver function from a command.Cli
-func AuthResolver(cli command.Cli) func(ctx context.Context, index *registrytypes.IndexInfo) registrytypes.AuthConfig {
+// AuthResolver returns an auth resolver function from a [config.Provider].
+//
+// Deprecated: this function was only used internally and will be removed in the next release.
+func AuthResolver(dockerCLI config.Provider) func(ctx context.Context, index *registrytypes.IndexInfo) registrytypes.AuthConfig {
+	return authResolver(dockerCLI)
+}
+
+// authResolver returns an auth resolver function from a [config.Provider].
+func authResolver(dockerCLI config.Provider) func(ctx context.Context, index *registrytypes.IndexInfo) registrytypes.AuthConfig {
 	return func(ctx context.Context, index *registrytypes.IndexInfo) registrytypes.AuthConfig {
-		return command.ResolveAuthConfig(cli.ConfigFile(), index)
+		return command.ResolveAuthConfig(dockerCLI.ConfigFile(), index)
 	}
 }
