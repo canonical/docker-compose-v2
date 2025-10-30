@@ -36,6 +36,17 @@
       "description": "The services that will be used by your application."
     },
 
+    "models": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9._-]+$": {
+          "$ref": "#/definitions/model"
+        }
+      },
+      "description": "Language models that will be used by your application."
+    },
+
+
     "networks": {
       "type": "object",
       "patternProperties": {
@@ -112,6 +123,8 @@
                 "no_cache": {"type": ["boolean", "string"], "description": "Do not use cache when building the image."},
                 "additional_contexts": {"$ref": "#/definitions/list_or_dict", "description": "Additional build contexts to use, specified as a map of name to context path or URL."},
                 "network": {"type": "string", "description": "Network mode to use for the build. Options include 'default', 'none', 'host', or a network name."},
+                "provenance": {"type": ["string","boolean"], "description": "Add a provenance attestation"},
+                "sbom": {"type": ["string","boolean"], "description": "Add a SBOM attestation"},
                 "pull": {"type": ["boolean", "string"], "description": "Always attempt to pull a newer version of the image."},
                 "target": {"type": "string", "description": "Build stage to target in a multi-stage Dockerfile."},
                 "shm_size": {"type": ["integer", "string"], "description": "Size of /dev/shm for the build container. A string value can use suffix like '2g' for 2 gigabytes."},
@@ -195,7 +208,8 @@
         },
         "container_name": {
           "type": "string",
-          "description": "Specify a custom container name, rather than a generated default name."
+          "description": "Specify a custom container name, rather than a generated default name.",
+          "pattern": "[a-zA-Z0-9][a-zA-Z0-9_.-]+"
         },
         "cpu_count": {
           "oneOf": [
@@ -407,13 +421,6 @@
                   { "type": "array", "items": {"type": ["string", "number", "boolean"]}}
                 ]}
               }
-            },
-            "configs": {
-              "type": "object",
-              "description": "Config files to pass to the provider.",
-              "patternProperties": {
-                "^.+$": {"type": ["string"]}
-              }
             }
           },
           "additionalProperties": false,
@@ -517,6 +524,36 @@
         "network_mode": {
           "type": "string",
           "description": "Network mode. Values can be 'bridge', 'host', 'none', 'service:[service name]', or 'container:[container name]'."
+        },
+        "models": {
+          "oneOf": [
+            {"$ref": "#/definitions/list_of_strings"},
+            {"type": "object",
+              "patternProperties": {
+                "^[a-zA-Z0-9._-]+$": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "endpoint_var": {
+                          "type": "string",
+                          "description": "Environment variable set to AI model endpoint."
+                        },
+                        "model_var": {
+                          "type": "string",
+                          "description": "Environment variable set to AI model name."
+                        }
+                      },
+                      "additionalProperties": false,
+                      "patternProperties": {"^x-": {}}
+                    },
+                    {"type": "null"}
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "AI Models to use, referencing entries under the top-level models key."
         },
         "networks": {
           "oneOf": [
@@ -739,6 +776,10 @@
           "$ref": "#/definitions/ulimits",
           "description": "Override the default ulimits for a container."
         },
+        "use_api_socket": {
+          "type": "boolean",
+          "description": "Bind mount Docker API socket and required auth."
+        },
         "user": {
           "type": "string",
           "description": "Username or UID to run the container process as."
@@ -956,6 +997,10 @@
               "exec": {
                 "$ref": "#/definitions/service_hook",
                 "description": "Command to execute when a change is detected and action is sync+exec."
+              },
+              "initial_sync": {
+                "type": "boolean",
+                "description": "Ensure that an initial synchronization is done before starting watch mode for sync+x triggers"
               }
             },
             "additionalProperties": false,
@@ -1529,6 +1574,32 @@
           "description": "Driver to use for templating the config's value."
         }
       },
+      "additionalProperties": false,
+      "patternProperties": {"^x-": {}}
+    },
+
+    "model": {
+      "type": "object",
+      "description": "Language Model for the Compose application.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Custom name for this model."
+        },
+        "model": {
+          "type": "string",
+          "description": "Language Model to run."
+        },
+        "context_size": {
+          "type": "integer"
+        },
+        "runtime_flags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Raw runtime flags to pass to the inference engine."
+        }
+      },
+      "required": ["model"],
       "additionalProperties": false,
       "patternProperties": {"^x-": {}}
     },
