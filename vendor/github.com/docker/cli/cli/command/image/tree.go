@@ -12,10 +12,10 @@ import (
 
 	"github.com/containerd/platforms"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/internal/tui"
 	"github.com/docker/docker/api/types/filters"
 	imagetypes "github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
 	"github.com/morikuni/aec"
 	"github.com/opencontainers/go-digest"
@@ -170,10 +170,16 @@ func getPossibleChips(view treeView) (chips []imageChip) {
 
 	var possible []imageChip
 	for _, img := range view.images {
+		details := []imageDetails{img.Details}
+
 		for _, c := range img.Children {
+			details = append(details, c.Details)
+		}
+
+		for _, d := range details {
 			for idx := len(remaining) - 1; idx >= 0; idx-- {
 				chip := remaining[idx]
-				if chip.check(&c.Details) {
+				if chip.check(&d) {
 					possible = append(possible, chip)
 					remaining = append(remaining[:idx], remaining[idx+1:]...)
 				}
@@ -216,7 +222,7 @@ func printImageTree(dockerCLI command.Cli, view treeView) error {
 			Align: alignLeft,
 			Width: 12,
 			DetailsValue: func(d *imageDetails) string {
-				return stringid.TruncateID(d.ID)
+				return formatter.TruncateID(d.ID)
 			},
 		},
 		{

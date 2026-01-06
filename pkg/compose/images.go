@@ -22,8 +22,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
@@ -90,6 +91,11 @@ func (s *composeService) Images(ctx context.Context, projectName string, options
 				}
 			}
 
+			created, err := time.Parse(time.RFC3339Nano, image.Created)
+			if err != nil {
+				return err
+			}
+
 			mux.Lock()
 			defer mux.Unlock()
 			summary[getCanonicalContainerName(c)] = api.ImageSummary{
@@ -103,6 +109,7 @@ func (s *composeService) Images(ctx context.Context, projectName string, options
 					Variant:      image.Variant,
 				},
 				Size:        image.Size,
+				Created:     created,
 				LastTagTime: image.Metadata.LastTagTime,
 			}
 			return nil
@@ -121,7 +128,7 @@ func (s *composeService) getImageSummaries(ctx context.Context, repoTags []strin
 		eg.Go(func() error {
 			inspect, err := s.apiClient().ImageInspect(ctx, repoTag)
 			if err != nil {
-				if cerrdefs.IsNotFound(err) {
+				if errdefs.IsNotFound(err) {
 					return nil
 				}
 				return fmt.Errorf("unable to get image '%s': %w", repoTag, err)

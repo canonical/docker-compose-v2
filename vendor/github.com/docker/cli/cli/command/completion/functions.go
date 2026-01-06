@@ -13,11 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ValidArgsFn a function to be used by cobra command as `ValidArgsFunction` to offer command line completion.
-//
-// Deprecated: use [cobra.CompletionFunc].
-type ValidArgsFn = cobra.CompletionFunc
-
 // APIClientProvider provides a method to get an [client.APIClient], initializing
 // it if needed.
 //
@@ -146,7 +141,9 @@ func FileNames(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCom
 	return nil, cobra.ShellCompDirectiveDefault
 }
 
-// NoComplete is used for commands where there's no relevant completion
+// NoComplete is used for commands where there's no relevant completion.
+//
+// Deprecated: use [cobra.NoFileCompletions]. This function  will be removed in the next release.
 func NoComplete(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }

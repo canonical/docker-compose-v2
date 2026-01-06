@@ -12,6 +12,7 @@ const (
 	CapSourceImage            apicaps.CapID = "source.image"
 	CapSourceImageResolveMode apicaps.CapID = "source.image.resolvemode"
 	CapSourceImageLayerLimit  apicaps.CapID = "source.image.layerlimit"
+	CapSourceImageChecksum    apicaps.CapID = "source.image.checksum"
 
 	CapSourceLocal                apicaps.CapID = "source.local"
 	CapSourceLocalUnique          apicaps.CapID = "source.local.unique"
@@ -23,14 +24,15 @@ const (
 	CapSourceLocalDiffer          apicaps.CapID = "source.local.differ"
 	CapSourceMetadataTransfer     apicaps.CapID = "source.local.metadatatransfer"
 
-	CapSourceGit              apicaps.CapID = "source.git"
-	CapSourceGitKeepDir       apicaps.CapID = "source.git.keepgitdir"
-	CapSourceGitFullURL       apicaps.CapID = "source.git.fullurl"
-	CapSourceGitHTTPAuth      apicaps.CapID = "source.git.httpauth"
-	CapSourceGitKnownSSHHosts apicaps.CapID = "source.git.knownsshhosts"
-	CapSourceGitMountSSHSock  apicaps.CapID = "source.git.mountsshsock"
-	CapSourceGitSubdir        apicaps.CapID = "source.git.subdir"
-	CapSourceGitChecksum      apicaps.CapID = "source.git.checksum"
+	CapSourceGit               apicaps.CapID = "source.git"
+	CapSourceGitKeepDir        apicaps.CapID = "source.git.keepgitdir"
+	CapSourceGitFullURL        apicaps.CapID = "source.git.fullurl"
+	CapSourceGitHTTPAuth       apicaps.CapID = "source.git.httpauth"
+	CapSourceGitKnownSSHHosts  apicaps.CapID = "source.git.knownsshhosts"
+	CapSourceGitMountSSHSock   apicaps.CapID = "source.git.mountsshsock"
+	CapSourceGitSubdir         apicaps.CapID = "source.git.subdir"
+	CapSourceGitChecksum       apicaps.CapID = "source.git.checksum"
+	CapSourceGitSkipSubmodules apicaps.CapID = "source.git.skipsubmodules"
 
 	CapSourceHTTP         apicaps.CapID = "source.http"
 	CapSourceHTTPAuth     apicaps.CapID = "source.http.auth"
@@ -123,6 +125,12 @@ func init() {
 
 	Caps.Init(apicaps.Cap{
 		ID:      CapSourceImageLayerLimit,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceImageChecksum,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})
@@ -225,6 +233,12 @@ func init() {
 
 	Caps.Init(apicaps.Cap{
 		ID:      CapSourceGitChecksum,
+		Enabled: true,
+		Status:  apicaps.CapStatusExperimental,
+	})
+
+	Caps.Init(apicaps.Cap{
+		ID:      CapSourceGitSkipSubmodules,
 		Enabled: true,
 		Status:  apicaps.CapStatusExperimental,
 	})

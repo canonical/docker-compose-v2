@@ -26,13 +26,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/api"
-	"github.com/moby/buildkit/util/gitutil"
+	gitutil "github.com/moby/buildkit/frontend/dockerfile/dfgitutil"
 	"github.com/sirupsen/logrus"
 )
 
@@ -64,7 +65,7 @@ type gitRemoteLoader struct {
 }
 
 func (g gitRemoteLoader) Accept(path string) bool {
-	_, err := gitutil.ParseGitRef(path)
+	_, _, err := gitutil.ParseGitRef(path)
 	return err == nil
 }
 
@@ -79,15 +80,15 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		return "", fmt.Errorf("git remote resource is disabled by %q", GIT_REMOTE_ENABLED)
 	}
 
-	ref, err := gitutil.ParseGitRef(path)
+	ref, _, err := gitutil.ParseGitRef(path)
 	if err != nil {
 		return "", err
 	}
 
 	local, ok := g.known[path]
 	if !ok {
-		if ref.Commit == "" {
-			ref.Commit = "HEAD" // default branch
+		if ref.Ref == "" {
+			ref.Ref = "HEAD" // default branch
 		}
 
 		err = g.resolveGitRef(ctx, path, ref)
@@ -100,7 +101,7 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 			return "", fmt.Errorf("initializing remote resource cache: %w", err)
 		}
 
-		local = filepath.Join(cache, ref.Commit)
+		local = filepath.Join(cache, ref.Ref)
 		if _, err := os.Stat(local); os.IsNotExist(err) {
 			if g.offline {
 				return "", nil
@@ -113,6 +114,9 @@ func (g gitRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 		g.known[path] = local
 	}
 	if ref.SubDir != "" {
+		if err := validateGitSubDir(local, ref.SubDir); err != nil {
+			return "", err
+		}
 		local = filepath.Join(local, ref.SubDir)
 	}
 	stat, err := os.Stat(local)
@@ -129,16 +133,51 @@ func (g gitRemoteLoader) Dir(path string) string {
 	return g.known[path]
 }
 
+// validateGitSubDir ensures a subdirectory path is contained within the base directory
+// and doesn't escape via path traversal. Unlike validatePathInBase for OCI artifacts,
+// this allows nested directories but prevents traversal outside the base.
+func validateGitSubDir(base, subDir string) error {
+	cleanSubDir := filepath.Clean(subDir)
+
+	if filepath.IsAbs(cleanSubDir) {
+		return fmt.Errorf("git subdirectory must be relative, got: %s", subDir)
+	}
+
+	if cleanSubDir == ".." || strings.HasPrefix(cleanSubDir, "../") || strings.HasPrefix(cleanSubDir, "..\\") {
+		return fmt.Errorf("git subdirectory path traversal detected: %s", subDir)
+	}
+
+	if len(cleanSubDir) >= 2 && cleanSubDir[1] == ':' {
+		return fmt.Errorf("git subdirectory must be relative, got: %s", subDir)
+	}
+
+	targetPath := filepath.Join(base, cleanSubDir)
+	cleanBase := filepath.Clean(base)
+	cleanTarget := filepath.Clean(targetPath)
+
+	// Ensure the target starts with the base path
+	relPath, err := filepath.Rel(cleanBase, cleanTarget)
+	if err != nil {
+		return fmt.Errorf("invalid git subdirectory path: %w", err)
+	}
+
+	if relPath == ".." || strings.HasPrefix(relPath, "../") || strings.HasPrefix(relPath, "..\\") {
+		return fmt.Errorf("git subdirectory escapes base directory: %s", subDir)
+	}
+
+	return nil
+}
+
 func (g gitRemoteLoader) resolveGitRef(ctx context.Context, path string, ref *gitutil.GitRef) error {
-	if !commitSHA.MatchString(ref.Commit) {
-		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", ref.Remote, ref.Commit)
+	if !commitSHA.MatchString(ref.Ref) {
+		cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", ref.Remote, ref.Ref)
 		cmd.Env = g.gitCommandEnv()
-		out, err := cmd.Output()
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			if cmd.ProcessState.ExitCode() == 2 {
 				return fmt.Errorf("repository does not contain ref %s, output: %q: %w", path, string(out), err)
 			}
-			return err
+			return fmt.Errorf("failed to access repository at %s:\n %s", ref.Remote, out)
 		}
 		if len(out) < 40 {
 			return fmt.Errorf("unexpected git command output: %q", string(out))
@@ -147,7 +186,7 @@ func (g gitRemoteLoader) resolveGitRef(ctx context.Context, path string, ref *gi
 		if !commitSHA.MatchString(sha) {
 			return fmt.Errorf("invalid commit sha %q", sha)
 		}
-		ref.Commit = sha
+		ref.Ref = sha
 	}
 	return nil
 }
@@ -169,7 +208,7 @@ func (g gitRemoteLoader) checkout(ctx context.Context, path string, ref *gitutil
 		return err
 	}
 
-	cmd = exec.CommandContext(ctx, "git", "fetch", "--depth=1", "origin", ref.Commit)
+	cmd = exec.CommandContext(ctx, "git", "fetch", "--depth=1", "origin", ref.Ref)
 	cmd.Env = g.gitCommandEnv()
 	cmd.Dir = path
 
@@ -178,7 +217,7 @@ func (g gitRemoteLoader) checkout(ctx context.Context, path string, ref *gitutil
 		return err
 	}
 
-	cmd = exec.CommandContext(ctx, "git", "checkout", ref.Commit)
+	cmd = exec.CommandContext(ctx, "git", "checkout", ref.Ref)
 	cmd.Dir = path
 	err = cmd.Run()
 	if err != nil {

@@ -56,10 +56,6 @@ func NewLogConsumer(ctx context.Context, stdout, stderr io.Writer, color, prefix
 	}
 }
 
-func (l *logConsumer) Register(name string) {
-	l.register(name)
-}
-
 func (l *logConsumer) register(name string) *presenter {
 	var p *presenter
 	root, _, found := strings.Cut(name, " ")
@@ -73,9 +69,12 @@ func (l *logConsumer) register(name string) *presenter {
 	} else {
 		cf := monochrome
 		if l.color {
-			if name == api.WatchLogger {
+			switch name {
+			case "":
+				cf = monochrome
+			case api.WatchLogger:
 				cf = makeColorFunc("92")
-			} else {
+			default:
 				cf = nextColor()
 			}
 		}
@@ -118,22 +117,14 @@ func (l *logConsumer) write(w io.Writer, container, message string) {
 	if l.ctx.Err() != nil {
 		return
 	}
-	if KeyboardManager != nil {
-		KeyboardManager.ClearKeyboardInfo()
-	}
-
 	p := l.getPresenter(container)
 	timestamp := time.Now().Format(jsonmessage.RFC3339NanoFixed)
 	for _, line := range strings.Split(message, "\n") {
 		if l.timestamp {
-			_, _ = fmt.Fprintf(w, "%s%s%s\n", p.prefix, timestamp, line)
+			_, _ = fmt.Fprintf(w, "%s%s %s\n", p.prefix, timestamp, line)
 		} else {
 			_, _ = fmt.Fprintf(w, "%s%s\n", p.prefix, line)
 		}
-	}
-
-	if KeyboardManager != nil {
-		KeyboardManager.PrintKeyboardInfo()
 	}
 }
 
@@ -167,4 +158,28 @@ func (p *presenter) setPrefix(width int) {
 		return
 	}
 	p.prefix = p.colors(fmt.Sprintf("%-"+strconv.Itoa(width)+"s | ", p.name))
+}
+
+type logDecorator struct {
+	decorated api.LogConsumer
+	Before    func()
+	After     func()
+}
+
+func (l logDecorator) Log(containerName, message string) {
+	l.Before()
+	l.decorated.Log(containerName, message)
+	l.After()
+}
+
+func (l logDecorator) Err(containerName, message string) {
+	l.Before()
+	l.decorated.Err(containerName, message)
+	l.After()
+}
+
+func (l logDecorator) Status(container, msg string) {
+	l.Before()
+	l.decorated.Status(container, msg)
+	l.After()
 }

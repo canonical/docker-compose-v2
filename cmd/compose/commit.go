@@ -39,7 +39,7 @@ type commitOptions struct {
 	index int
 }
 
-func commitCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
+func commitCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Compose) *cobra.Command {
 	options := commitOptions{
 		ProjectOptions: p,
 	}
@@ -73,13 +73,13 @@ func commitCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service
 	return cmd
 }
 
-func runCommit(ctx context.Context, dockerCli command.Cli, backend api.Service, options commitOptions) error {
+func runCommit(ctx context.Context, dockerCli command.Cli, backend api.Compose, options commitOptions) error {
 	projectName, err := options.toProjectName(ctx, dockerCli)
 	if err != nil {
 		return err
 	}
 
-	commitOptions := api.CommitOptions{
+	return backend.Commit(ctx, projectName, api.CommitOptions{
 		Service:   options.service,
 		Reference: options.reference,
 		Pause:     options.pause,
@@ -87,7 +87,5 @@ func runCommit(ctx context.Context, dockerCli command.Cli, backend api.Service, 
 		Author:    options.author,
 		Changes:   options.changes,
 		Index:     options.index,
-	}
-
-	return backend.Commit(ctx, projectName, commitOptions)
+	})
 }

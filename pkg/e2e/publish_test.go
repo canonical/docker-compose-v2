@@ -17,6 +17,7 @@
 package e2e
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,14 +31,14 @@ func TestPublishChecks(t *testing.T) {
 
 	t.Run("publish error environment", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-environment.yml",
-			"-p", projectName, "alpha", "publish", "test/test")
+			"-p", projectName, "publish", "test/test")
 		res.Assert(t, icmd.Expected{ExitCode: 1, Err: `service "serviceA" has environment variable(s) declared.
 To avoid leaking sensitive data,`})
 	})
 
 	t.Run("publish error env_file", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-env-file.yml",
-			"-p", projectName, "alpha", "publish", "test/test")
+			"-p", projectName, "publish", "test/test")
 		res.Assert(t, icmd.Expected{ExitCode: 1, Err: `service "serviceA" has env_file declared.
 service "serviceA" has environment variable(s) declared.
 To avoid leaking sensitive data,`})
@@ -45,7 +46,7 @@ To avoid leaking sensitive data,`})
 
 	t.Run("publish multiple errors env_file and environment", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-multi-env-config.yml",
-			"-p", projectName, "alpha", "publish", "test/test")
+			"-p", projectName, "publish", "test/test")
 		// we don't in which order the services will be loaded, so we can't predict the order of the error messages
 		assert.Assert(t, strings.Contains(res.Combined(), `service "serviceB" has env_file declared.`), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), `service "serviceB" has environment variable(s) declared.`), res.Combined())
@@ -57,72 +58,92 @@ or remove sensitive data from your Compose configuration
 
 	t.Run("publish success environment", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/publish/compose-environment.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "-y", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "-y", "--dry-run")
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test publishing"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("publish success env_file", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/publish/compose-env-file.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "-y", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "-y", "--dry-run")
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test publishing"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("publish approve validation message", func(t *testing.T) {
 		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-env-file.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "--dry-run")
 		cmd.Stdin = strings.NewReader("y\n")
 		res := icmd.RunCmd(cmd)
 		res.Assert(t, icmd.Expected{ExitCode: 0})
-		assert.Assert(t, strings.Contains(res.Combined(), "Are you ok to publish these environment variables? [y/N]:"), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "Are you ok to publish these environment variables?"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test publishing"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("publish refuse validation message", func(t *testing.T) {
 		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-env-file.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "--dry-run")
 		cmd.Stdin = strings.NewReader("n\n")
 		res := icmd.RunCmd(cmd)
 		res.Assert(t, icmd.Expected{ExitCode: 0})
-		assert.Assert(t, strings.Contains(res.Combined(), "Are you ok to publish these environment variables? [y/N]:"), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "Are you ok to publish these environment variables?"), res.Combined())
 		assert.Assert(t, !strings.Contains(res.Combined(), "test/test publishing"), res.Combined())
 		assert.Assert(t, !strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("publish with extends", func(t *testing.T) {
 		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/publish/compose-with-extends.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--dry-run")
 		assert.Assert(t, strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("publish list env variables", func(t *testing.T) {
 		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-multi-env-config.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "--dry-run")
 		cmd.Stdin = strings.NewReader("n\n")
 		res := icmd.RunCmd(cmd)
 		res.Assert(t, icmd.Expected{ExitCode: 0})
-		assert.Assert(t, strings.Contains(res.Combined(), `you are about to publish environment variables within your OCI artifact.
-please double check that you are not leaking sensitive data`), res.Combined())
-		assert.Assert(t, strings.Contains(res.Combined(), `Service/Config  serviceA
-FOO=bar`), res.Combined())
-		assert.Assert(t, strings.Contains(res.Combined(), `Service/Config  serviceB`), res.Combined())
+		out := res.Combined()
+		assert.Assert(t, strings.Contains(out, `you are about to publish environment variables within your OCI artifact.
+please double check that you are not leaking sensitive data`), out)
+		assert.Assert(t, strings.Contains(out, `Service/Config  serviceA
+FOO=bar`), out)
+		assert.Assert(t, strings.Contains(out, `Service/Config  serviceB`), out)
 		// we don't know in which order the env variables will be loaded
-		assert.Assert(t, strings.Contains(res.Combined(), `FOO=bar`), res.Combined())
-		assert.Assert(t, strings.Contains(res.Combined(), `BAR=baz`), res.Combined())
-		assert.Assert(t, strings.Contains(res.Combined(), `QUIX=`), res.Combined())
+		assert.Assert(t, strings.Contains(out, `FOO=bar`), out)
+		assert.Assert(t, strings.Contains(out, `BAR=baz`), out)
+		assert.Assert(t, strings.Contains(out, `QUIX=`), out)
 	})
 
 	t.Run("refuse to publish with bind mount", func(t *testing.T) {
-		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-bind-mount.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--dry-run")
-		res.Assert(t, icmd.Expected{ExitCode: 1, Err: `cannot publish compose file: service "serviceA" relies on bind-mount. You should use volumes`})
+		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-bind-mount.yml",
+			"-p", projectName, "publish", "test/test", "--dry-run")
+		cmd.Stdin = strings.NewReader("n\n")
+		res := icmd.RunCmd(cmd)
+		res.Assert(t, icmd.Expected{ExitCode: 0})
+		out := res.Combined()
+		assert.Assert(t, strings.Contains(out, "you are about to publish bind mounts declaration within your OCI artifact."), out)
+		assert.Assert(t, strings.Contains(out, "e2e/fixtures/publish:/user-data"), out)
+		assert.Assert(t, strings.Contains(out, "Are you ok to publish these bind mount declarations?"), out)
+		assert.Assert(t, !strings.Contains(out, "serviceA published"), out)
+	})
+
+	t.Run("publish with bind mount", func(t *testing.T) {
+		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-bind-mount.yml",
+			"-p", projectName, "publish", "test/test", "--dry-run")
+		cmd.Stdin = strings.NewReader("y\n")
+		res := icmd.RunCmd(cmd)
+		res.Assert(t, icmd.Expected{ExitCode: 0})
+		assert.Assert(t, strings.Contains(res.Combined(), "you are about to publish bind mounts declaration within your OCI artifact."), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "Are you ok to publish these bind mount declarations?"), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "e2e/fixtures/publish:/user-data"), res.Combined())
+		assert.Assert(t, strings.Contains(res.Combined(), "test/test published"), res.Combined())
 	})
 
 	t.Run("refuse to publish with build section only", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-build-only.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "-y", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "-y", "--dry-run")
 		res.Assert(t, icmd.Expected{ExitCode: 1})
 		assert.Assert(t, strings.Contains(res.Combined(), "your Compose stack cannot be published as it only contains a build section for service(s):"), res.Combined())
 		assert.Assert(t, strings.Contains(res.Combined(), "serviceA"), res.Combined())
@@ -131,13 +152,13 @@ FOO=bar`), res.Combined())
 
 	t.Run("refuse to publish with local include", func(t *testing.T) {
 		res := c.RunDockerComposeCmdNoCheck(t, "-f", "./fixtures/publish/compose-local-include.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--dry-run")
 		res.Assert(t, icmd.Expected{ExitCode: 1, Err: "cannot publish compose file with local includes"})
 	})
 
 	t.Run("detect sensitive data", func(t *testing.T) {
 		cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/compose-sensitive.yml",
-			"-p", projectName, "alpha", "publish", "test/test", "--with-env", "--dry-run")
+			"-p", projectName, "publish", "test/test", "--with-env", "--dry-run")
 		cmd.Stdin = strings.NewReader("n\n")
 		res := icmd.RunCmd(cmd)
 		res.Assert(t, icmd.Expected{ExitCode: 0})
@@ -152,4 +173,44 @@ FOO=bar`), res.Combined())
 			"eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw"), output)
 		assert.Assert(t, strings.Contains(output, "Private Key\n\"\": -----BEGIN DSA PRIVATE KEY-----\nwxyz+ABC=\n-----END DSA PRIVATE KEY-----"), output)
 	})
+}
+
+func TestPublish(t *testing.T) {
+	c := NewParallelCLI(t)
+	const projectName = "compose-e2e-publish"
+	const registryName = projectName + "-registry"
+	c.RunDockerCmd(t, "run", "--name", registryName, "-P", "-d", "registry:3")
+	port := c.RunDockerCmd(t, "inspect", "--format", `{{ (index (index .NetworkSettings.Ports "5000/tcp") 0).HostPort }}`, registryName).Stdout()
+	registry := "localhost:" + strings.TrimSpace(port)
+	t.Cleanup(func() {
+		c.RunDockerCmd(t, "rm", "--force", registryName)
+	})
+
+	cmd := c.NewDockerComposeCmd(t, "-f", "./fixtures/publish/oci/compose.yaml", "-f", "./fixtures/publish/oci/compose-override.yaml",
+		"-p", projectName, "publish", "--with-env", "--yes", registry+"/test:test")
+	icmd.RunCmd(cmd, func(cmd *icmd.Cmd) {
+		cmd.Env = append(cmd.Env, "__TEST__INSECURE__REGISTRY__=true")
+	}).Assert(t, icmd.Expected{ExitCode: 0})
+
+	// docker exec -it compose-e2e-publish-registry tree /var/lib/registry/docker/registry/v2/
+
+	cmd = c.NewDockerComposeCmd(t, "--verbose", "--project-name=oci", "-f", fmt.Sprintf("oci://%s/test:test", registry), "config")
+	res := icmd.RunCmd(cmd, func(cmd *icmd.Cmd) {
+		cmd.Env = append(cmd.Env,
+			"XDG_CACHE_HOME="+t.TempDir(),
+			"__TEST__INSECURE__REGISTRY__=true")
+	})
+	res.Assert(t, icmd.Expected{ExitCode: 0})
+	assert.Equal(t, res.Stdout(), `name: oci
+services:
+  app:
+    environment:
+      HELLO: WORLD
+    image: alpine
+    networks:
+      default: null
+networks:
+  default:
+    name: oci_default
+`)
 }

@@ -36,12 +36,10 @@ import (
 	composegoutils "github.com/compose-spec/compose-go/v2/utils"
 	"github.com/docker/buildx/util/logutil"
 	dockercli "github.com/docker/cli/cli"
-	"github.com/docker/cli/cli-plugins/manager"
+	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/pkg/kvfile"
 	"github.com/docker/compose/v2/cmd/formatter"
-	"github.com/docker/compose/v2/internal/desktop"
-	"github.com/docker/compose/v2/internal/experimental"
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/docker/compose/v2/pkg/api"
 	ui "github.com/docker/compose/v2/pkg/progress"
@@ -89,14 +87,6 @@ func init() {
 	// compose evaluates env file values for interpolation
 	// `raw` format allows to load env_file with the same parser used by docker run --env-file
 	dotenv.RegisterFormat("raw", rawEnv)
-}
-
-type Backend interface {
-	api.Service
-
-	SetDesktopClient(cli *desktop.Client)
-
-	SetExperiments(experiments *experimental.State)
 }
 
 // Command defines a compose CLI command as a func with args
@@ -245,7 +235,7 @@ func (o *ProjectOptions) projectOrName(ctx context.Context, dockerCli command.Cl
 	name := o.ProjectName
 	var project *types.Project
 	if len(o.ConfigPaths) > 0 || o.ProjectName == "" {
-		p, _, err := o.ToProject(ctx, dockerCli, services, cli.WithDiscardEnvFile)
+		p, _, err := o.ToProject(ctx, dockerCli, services, cli.WithDiscardEnvFile, cli.WithoutEnvironmentResolution)
 		if err != nil {
 			envProjectName := os.Getenv(ComposeProjectName)
 			if envProjectName != "" {
@@ -383,32 +373,38 @@ func (o *ProjectOptions) remoteLoaders(dockerCli command.Cli) []loader.ResourceL
 }
 
 func (o *ProjectOptions) toProjectOptions(po ...cli.ProjectOptionsFn) (*cli.ProjectOptions, error) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
+	opts := []cli.ProjectOptionsFn{
+		cli.WithWorkingDirectory(o.ProjectDir),
+		// First apply os.Environment, always win
+		cli.WithOsEnv,
 	}
 
-	return cli.NewProjectOptions(o.ConfigPaths,
-		append(po,
-			cli.WithWorkingDirectory(o.ProjectDir),
-			// First apply os.Environment, always win
-			cli.WithOsEnv,
-			// set PWD as this variable is not consistently supported on Windows
-			cli.WithEnv([]string{"PWD=" + pwd}),
-			// Load PWD/.env if present and no explicit --env-file has been set
-			cli.WithEnvFiles(o.EnvFiles...),
-			// read dot env file to populate project environment
-			cli.WithDotEnv,
-			// get compose file path set by COMPOSE_FILE
-			cli.WithConfigFileEnv,
-			// if none was selected, get default compose.yaml file from current dir or parent folder
-			cli.WithDefaultConfigPath,
-			// .. and then, a project directory != PWD maybe has been set so let's load .env file
-			cli.WithEnvFiles(o.EnvFiles...),
-			cli.WithDotEnv,
-			// eventually COMPOSE_PROFILES should have been set
-			cli.WithDefaultProfiles(o.Profiles...),
-			cli.WithName(o.ProjectName))...)
+	if _, present := os.LookupEnv("PWD"); !present {
+		if pwd, err := os.Getwd(); err != nil {
+			return nil, err
+		} else {
+			opts = append(opts, cli.WithEnv([]string{"PWD=" + pwd}))
+		}
+	}
+
+	opts = append(opts,
+		// Load PWD/.env if present and no explicit --env-file has been set
+		cli.WithEnvFiles(o.EnvFiles...),
+		// read dot env file to populate project environment
+		cli.WithDotEnv,
+		// get compose file path set by COMPOSE_FILE
+		cli.WithConfigFileEnv,
+		// if none was selected, get default compose.yaml file from current dir or parent folder
+		cli.WithDefaultConfigPath,
+		// .. and then, a project directory != PWD maybe has been set so let's load .env file
+		cli.WithEnvFiles(o.EnvFiles...),
+		cli.WithDotEnv,
+		// eventually COMPOSE_PROFILES should have been set
+		cli.WithDefaultProfiles(o.Profiles...),
+		cli.WithName(o.ProjectName),
+	)
+
+	return cli.NewProjectOptions(o.ConfigPaths, append(po, opts...)...)
 }
 
 // PluginName is the name of the plugin
@@ -416,11 +412,11 @@ const PluginName = "compose"
 
 // RunningAsStandalone detects when running as a standalone program
 func RunningAsStandalone() bool {
-	return len(os.Args) < 2 || os.Args[1] != manager.MetadataSubcommandName && os.Args[1] != PluginName
+	return len(os.Args) < 2 || os.Args[1] != metadata.MetadataSubcommandName && os.Args[1] != PluginName
 }
 
 // RootCommand returns the compose command with its child commands
-func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //nolint:gocyclo
+func RootCommand(dockerCli command.Cli, backend api.Compose) *cobra.Command { //nolint:gocyclo
 	// filter out useless commandConn.CloseWrite warning message that can occur
 	// when using a remote context that is unreachable: "commandConn.CloseWrite: commandconn: failed to wait: signal: killed"
 	// https://github.com/docker/cli/blob/e1f24d3c93df6752d3c27c8d61d18260f141310c/cli/connhelper/commandconn/commandconn.go#L203-L215
@@ -431,7 +427,6 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 		"commandConn.CloseRead:",
 	))
 
-	experiments := experimental.NewState()
 	opts := ProjectOptions{}
 	var (
 		ansi     string
@@ -575,27 +570,6 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 			}
 			cmd.SetContext(ctx)
 
-			// (6) Desktop integration
-			var desktopCli *desktop.Client
-			if !dryRun {
-				if desktopCli, err = desktop.NewFromDockerClient(ctx, dockerCli); desktopCli != nil {
-					logrus.Debugf("Enabled Docker Desktop integration (experimental) @ %s", desktopCli.Endpoint())
-					backend.SetDesktopClient(desktopCli)
-				} else if err != nil {
-					// not fatal, Compose will still work but behave as though
-					// it's not running as part of Docker Desktop
-					logrus.Debugf("failed to enable Docker Desktop integration: %v", err)
-				} else {
-					logrus.Trace("Docker Desktop integration not enabled")
-				}
-			}
-
-			// (7) experimental features
-			if err := experiments.Load(ctx, desktopCli); err != nil {
-				logrus.Debugf("Failed to query feature flags from Desktop: %v", err)
-			}
-			backend.SetExperiments(experiments)
-
 			return nil
 		},
 	}
@@ -636,6 +610,7 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 		publishCommand(&opts, dockerCli, backend),
 		alphaCommand(&opts, dockerCli, backend),
 		bridgeCommand(&opts, dockerCli),
+		volumesCommand(&opts, dockerCli, backend),
 	)
 
 	c.Flags().SetInterspersed(false)
@@ -659,6 +634,10 @@ func RootCommand(dockerCli command.Cli, backend Backend) *cobra.Command { //noli
 	c.RegisterFlagCompletionFunc( //nolint:errcheck
 		"profile",
 		completeProfileNames(dockerCli, &opts),
+	)
+	c.RegisterFlagCompletionFunc( //nolint:errcheck
+		"progress",
+		cobra.FixedCompletions(printerModes, cobra.ShellCompDirectiveNoFileComp),
 	)
 
 	c.Flags().StringVar(&ansi, "ansi", "auto", `Control when to print ANSI control characters ("never"|"always"|"auto")`)
@@ -688,7 +667,7 @@ func setEnvWithDotEnv(opts ProjectOptions) error {
 		return nil
 	}
 	for k, v := range envFromFile {
-		if _, ok := os.LookupEnv(k); !ok {
+		if _, ok := os.LookupEnv(k); !ok && strings.HasPrefix(k, "COMPOSE_") {
 			if err = os.Setenv(k, v); err != nil {
 				return nil
 			}
@@ -703,16 +682,4 @@ var printerModes = []string{
 	ui.ModePlain,
 	ui.ModeJSON,
 	ui.ModeQuiet,
-}
-
-func SetUnchangedOption(name string, experimentalFlag bool) bool {
-	var value bool
-	// If the var is defined we use that value first
-	if envVar, ok := os.LookupEnv(name); ok {
-		value = utils.StringToBool(envVar)
-	} else {
-		// if not, we try to get it from experimental feature flag
-		value = experimentalFlag
-	}
-	return value
 }

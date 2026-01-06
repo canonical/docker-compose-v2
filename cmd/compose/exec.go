@@ -18,13 +18,18 @@ package compose
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/compose"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 type execOpts struct {
@@ -43,7 +48,7 @@ type execOpts struct {
 	interactive bool
 }
 
-func execCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
+func execCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Compose) *cobra.Command {
 	opts := execOpts{
 		composeOptions: &composeOptions{
 			ProjectOptions: p,
@@ -59,7 +64,15 @@ func execCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 			return nil
 		}),
 		RunE: Adapt(func(ctx context.Context, args []string) error {
-			return runExec(ctx, dockerCli, backend, opts)
+			err := runExec(ctx, dockerCli, backend, opts)
+			if err != nil {
+				logrus.Debugf("%v", err)
+				var cliError cli.StatusError
+				if ok := errors.As(err, &cliError); ok {
+					os.Exit(err.(cli.StatusError).StatusCode) //nolint: errorlint
+				}
+			}
+			return err
 		}),
 		ValidArgsFunction: completeServiceNames(dockerCli, p),
 	}
@@ -69,7 +82,7 @@ func execCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 	runCmd.Flags().IntVar(&opts.index, "index", 0, "Index of the container if service has multiple replicas")
 	runCmd.Flags().BoolVarP(&opts.privileged, "privileged", "", false, "Give extended privileges to the process")
 	runCmd.Flags().StringVarP(&opts.user, "user", "u", "", "Run the command as this user")
-	runCmd.Flags().BoolVarP(&opts.noTty, "no-TTY", "T", !dockerCli.Out().IsTerminal(), "Disable pseudo-TTY allocation. By default `docker compose exec` allocates a TTY.")
+	runCmd.Flags().BoolVarP(&opts.noTty, "no-tty", "T", !dockerCli.Out().IsTerminal(), "Disable pseudo-TTY allocation. By default 'docker compose exec' allocates a TTY.")
 	runCmd.Flags().StringVarP(&opts.workingDir, "workdir", "w", "", "Path to workdir directory for this command")
 
 	runCmd.Flags().BoolVarP(&opts.interactive, "interactive", "i", true, "Keep STDIN open even if not attached")
@@ -78,10 +91,16 @@ func execCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) 
 	runCmd.Flags().MarkHidden("tty") //nolint:errcheck
 
 	runCmd.Flags().SetInterspersed(false)
+	runCmd.Flags().SetNormalizeFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "no-TTY" { // legacy
+			name = "no-tty"
+		}
+		return pflag.NormalizedName(name)
+	})
 	return runCmd
 }
 
-func runExec(ctx context.Context, dockerCli command.Cli, backend api.Service, opts execOpts) error {
+func runExec(ctx context.Context, dockerCli command.Cli, backend api.Compose, opts execOpts) error {
 	projectName, err := opts.toProjectName(ctx, dockerCli)
 	if err != nil {
 		return err
@@ -109,8 +128,8 @@ func runExec(ctx context.Context, dockerCli command.Cli, backend api.Service, op
 
 	exitCode, err := backend.Exec(ctx, projectName, execOpts)
 	if exitCode != 0 {
-		errMsg := ""
-		if err != nil {
+		errMsg := fmt.Sprintf("exit status %d", exitCode)
+		if err != nil && err.Error() != "" {
 			errMsg = err.Error()
 		}
 		return cli.StatusError{StatusCode: exitCode, Status: errMsg}

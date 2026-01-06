@@ -11,7 +11,7 @@ import (
 	"path"
 	"strings"
 
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
@@ -52,7 +52,13 @@ type createOptions struct {
 }
 
 // NewCreateCommand creates a new cobra.Command for `docker create`
-func NewCreateCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewCreateCommand(dockerCLI command.Cli) *cobra.Command {
+	return newCreateCommand(dockerCLI)
+}
+
+func newCreateCommand(dockerCLI command.Cli) *cobra.Command {
 	var options createOptions
 	var copts *containerOptions
 
@@ -65,12 +71,12 @@ func NewCreateCommand(dockerCli command.Cli) *cobra.Command {
 			if len(args) > 1 {
 				copts.Args = args[1:]
 			}
-			return runCreate(cmd.Context(), dockerCli, cmd.Flags(), &options, copts)
+			return runCreate(cmd.Context(), dockerCLI, cmd.Flags(), &options, copts)
 		},
 		Annotations: map[string]string{
 			"aliases": "docker container create, docker create",
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli, -1),
+		ValidArgsFunction: completion.ImageNames(dockerCLI, -1),
 	}
 
 	flags := cmd.Flags()
@@ -86,17 +92,20 @@ func NewCreateCommand(dockerCli command.Cli) *cobra.Command {
 	// with hostname
 	flags.Bool("help", false, "Print usage")
 
-	command.AddPlatformFlag(flags, &options.platform)
-	command.AddTrustVerificationFlags(flags, &options.untrusted, dockerCli.ContentTrustEnabled())
+	// TODO(thaJeztah): consider adding platform as "image create option" on containerOptions
+	addPlatformFlag(flags, &options.platform)
+	_ = cmd.RegisterFlagCompletionFunc("platform", completion.Platforms)
+
+	flags.BoolVar(&options.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image verification")
 	copts = addFlags(flags)
 
-	addCompletions(cmd, dockerCli)
+	addCompletions(cmd, dockerCLI)
 
 	flags.VisitAll(func(flag *pflag.Flag) {
 		// Set a default completion function if none was set. We don't look
 		// up if it does already have one set, because Cobra does this for
 		// us, and returns an error (which we ignore for this reason).
-		_ = cmd.RegisterFlagCompletionFunc(flag.Name, completion.NoComplete)
+		_ = cmd.RegisterFlagCompletionFunc(flag.Name, cobra.NoFileCompletions)
 	})
 
 	return cmd
@@ -248,15 +257,14 @@ func createContainer(ctx context.Context, dockerCli command.Cli, containerCfg *c
 		// 1. Mount the actual docker socket.
 		// 2. A synthezised ~/.docker/config.json with resolved tokens.
 
-		socket := dockerCli.DockerEndpoint().Host
-		if !strings.HasPrefix(socket, "unix://") {
-			return "", fmt.Errorf("flag --use-api-socket can only be used with unix sockets: docker endpoint %s incompatible", socket)
+		if dockerCli.ServerInfo().OSType == "windows" {
+			return "", errors.New("flag --use-api-socket can't be used with a Windows Docker Engine")
 		}
-		socket = strings.TrimPrefix(socket, "unix://") // should we confirm absolute path?
 
+		// hard-code engine socket path until https://github.com/moby/moby/pull/43459 gives us a discovery mechanism
 		containerCfg.HostConfig.Mounts = append(containerCfg.HostConfig.Mounts, mount.Mount{
 			Type:        mount.TypeBind,
-			Source:      socket,
+			Source:      "/var/run/docker.sock",
 			Target:      "/var/run/docker.sock",
 			BindOptions: &mount.BindOptions{},
 		})
@@ -342,7 +350,7 @@ func createContainer(ctx context.Context, dockerCli command.Cli, containerCfg *c
 	response, err := dockerCli.Client().ContainerCreate(ctx, config, hostConfig, networkingConfig, platform, options.name)
 	if err != nil {
 		// Pull image if it does not exist locally and we have the PullImageMissing option. Default behavior.
-		if cerrdefs.IsNotFound(err) && namedRef != nil && options.pull == PullImageMissing {
+		if errdefs.IsNotFound(err) && namedRef != nil && options.pull == PullImageMissing {
 			if !options.quiet {
 				// we don't want to write to stdout anything apart from container.ID
 				_, _ = fmt.Fprintf(dockerCli.Err(), "Unable to find image '%s' locally\n", reference.FamiliarString(namedRef))

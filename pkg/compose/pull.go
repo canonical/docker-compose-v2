@@ -34,11 +34,10 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/docker/docker/registry"
-	"github.com/hashicorp/go-multierror"
 	"github.com/opencontainers/go-digest"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/docker/compose/v2/internal/registry"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
 )
@@ -117,7 +116,7 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 
 		idx := i
 		eg.Go(func() error {
-			_, err := s.pullServiceImage(ctx, service, s.configFile(), w, opts.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
+			_, err := s.pullServiceImage(ctx, service, w, opts.Quiet, project.Environment["DOCKER_DEFAULT_PLATFORM"])
 			if err != nil {
 				pullErrors[idx] = err
 				if service.Build != nil {
@@ -152,7 +151,7 @@ func (s *composeService) pull(ctx context.Context, project *types.Project, opts 
 	if opts.IgnoreFailures {
 		return nil
 	}
-	return multierror.Append(nil, pullErrors...).ErrorOrNil()
+	return errors.Join(pullErrors...)
 }
 
 func imageAlreadyPresent(serviceImage string, localImages map[string]api.ImageSummary) bool {
@@ -160,12 +159,14 @@ func imageAlreadyPresent(serviceImage string, localImages map[string]api.ImageSu
 	if err != nil {
 		return false
 	}
-	tagged, ok := normalizedImage.(reference.NamedTagged)
-	if !ok {
-		return false
+	switch refType := normalizedImage.(type) {
+	case reference.NamedTagged:
+		_, ok := localImages[serviceImage]
+		return ok && refType.Tag() != "latest"
+	default:
+		_, ok := localImages[serviceImage]
+		return ok
 	}
-	_, ok = localImages[serviceImage]
-	return ok && tagged.Tag() != "latest"
 }
 
 func getUnwrappedErrorMessage(err error) string {
@@ -176,9 +177,7 @@ func getUnwrappedErrorMessage(err error) string {
 	return err.Error()
 }
 
-func (s *composeService) pullServiceImage(ctx context.Context, service types.ServiceConfig,
-	configFile driver.Auth, w progress.Writer, quietPull bool, defaultPlatform string,
-) (string, error) {
+func (s *composeService) pullServiceImage(ctx context.Context, service types.ServiceConfig, w progress.Writer, quietPull bool, defaultPlatform string) (string, error) {
 	w.Event(progress.Event{
 		ID:     service.Name,
 		Status: progress.Working,
@@ -189,7 +188,7 @@ func (s *composeService) pullServiceImage(ctx context.Context, service types.Ser
 		return "", err
 	}
 
-	encodedAuth, err := encodedAuth(ref, configFile)
+	encodedAuth, err := encodedAuth(ref, s.configFile())
 	if err != nil {
 		return "", err
 	}
@@ -281,13 +280,7 @@ func ImageDigestResolver(ctx context.Context, file *configfile.ConfigFile, apiCl
 }
 
 func encodedAuth(ref reference.Named, configFile driver.Auth) (string, error) {
-	repoInfo, err := registry.ParseRepositoryInfo(ref)
-	if err != nil {
-		return "", err
-	}
-
-	key := registry.GetAuthConfigKey(repoInfo.Index)
-	authConfig, err := configFile.GetAuthConfig(key)
+	authConfig, err := configFile.GetAuthConfig(registry.GetAuthConfigKey(reference.Domain(ref)))
 	if err != nil {
 		return "", err
 	}
@@ -335,7 +328,7 @@ func (s *composeService) pullRequiredImages(ctx context.Context, project *types.
 		var mutex sync.Mutex
 		for name, service := range needPull {
 			eg.Go(func() error {
-				id, err := s.pullServiceImage(ctx, service, s.configFile(), w, quietPull, project.Environment["DOCKER_DEFAULT_PLATFORM"])
+				id, err := s.pullServiceImage(ctx, service, w, quietPull, project.Environment["DOCKER_DEFAULT_PLATFORM"])
 				mutex.Lock()
 				defer mutex.Unlock()
 				pulledImages[name] = api.ImageSummary{

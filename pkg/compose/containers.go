@@ -100,7 +100,7 @@ func (s *composeService) getSpecifiedContainer(ctx context.Context, projectName 
 		IsOneOffLabelTrueX := containers[i].Labels[api.OneoffLabel] == "True"
 		IsOneOffLabelTrueY := containers[j].Labels[api.OneoffLabel] == "True"
 
-		if numberLabelX == numberLabelY {
+		if IsOneOffLabelTrueX || IsOneOffLabelTrueY {
 			return !IsOneOffLabelTrueX && IsOneOffLabelTrueY
 		}
 
@@ -128,12 +128,6 @@ func isService(services ...string) containerPredicate {
 	}
 }
 
-func isRunning() containerPredicate {
-	return func(c container.Summary) bool {
-		return c.State == "running"
-	}
-}
-
 // isOrphaned is a predicate to select containers without a matching service definition in compose project
 func isOrphaned(project *types.Project) containerPredicate {
 	services := append(project.ServiceNames(), project.DisabledServiceNames()...)
@@ -141,7 +135,7 @@ func isOrphaned(project *types.Project) containerPredicate {
 		// One-off container
 		v, ok := c.Labels[api.OneoffLabel]
 		if ok && v == "True" {
-			return c.State == ContainerExited || c.State == ContainerDead
+			return c.State == container.StateExited || c.State == container.StateDead
 		}
 		// Service that is not defined in the compose model
 		service := c.Labels[api.ServiceLabel]
