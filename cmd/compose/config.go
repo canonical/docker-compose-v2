@@ -50,6 +50,8 @@ type configOptions struct {
 	noResolveEnv        bool
 	services            bool
 	volumes             bool
+	networks            bool
+	models              bool
 	profiles            bool
 	images              bool
 	hash                string
@@ -111,6 +113,12 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 			if opts.volumes {
 				return runVolumes(ctx, dockerCli, opts)
 			}
+			if opts.networks {
+				return runNetworks(ctx, dockerCli, opts)
+			}
+			if opts.models {
+				return runModels(ctx, dockerCli, opts)
+			}
 			if opts.hash != "" {
 				return runHash(ctx, dockerCli, opts)
 			}
@@ -147,6 +155,8 @@ func configCommand(p *ProjectOptions, dockerCli command.Cli) *cobra.Command {
 
 	flags.BoolVar(&opts.services, "services", false, "Print the service names, one per line.")
 	flags.BoolVar(&opts.volumes, "volumes", false, "Print the volume names, one per line.")
+	flags.BoolVar(&opts.networks, "networks", false, "Print the network names, one per line.")
+	flags.BoolVar(&opts.models, "models", false, "Print the model names, one per line.")
 	flags.BoolVar(&opts.profiles, "profiles", false, "Print the profile names, one per line.")
 	flags.BoolVar(&opts.images, "images", false, "Print the image names, one per line.")
 	flags.StringVar(&opts.hash, "hash", "", "Print the service config hash, one per line.")
@@ -363,6 +373,30 @@ func runVolumes(ctx context.Context, dockerCli command.Cli, opts configOptions) 
 	}
 	for n := range project.Volumes {
 		_, _ = fmt.Fprintln(dockerCli.Out(), n)
+	}
+	return nil
+}
+
+func runNetworks(ctx context.Context, dockerCli command.Cli, opts configOptions) error {
+	project, err := opts.ToProject(ctx, dockerCli, nil, cli.WithoutEnvironmentResolution)
+	if err != nil {
+		return err
+	}
+	for n := range project.Networks {
+		_, _ = fmt.Fprintln(dockerCli.Out(), n)
+	}
+	return nil
+}
+
+func runModels(ctx context.Context, dockerCli command.Cli, opts configOptions) error {
+	project, err := opts.ToProject(ctx, dockerCli, nil, cli.WithoutEnvironmentResolution)
+	if err != nil {
+		return err
+	}
+	for _, model := range project.Models {
+		if model.Model != "" {
+			_, _ = fmt.Fprintln(dockerCli.Out(), model.Model)
+		}
 	}
 	return nil
 }

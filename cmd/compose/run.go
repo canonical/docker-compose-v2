@@ -50,7 +50,6 @@ type runOptions struct {
 	Detach        bool
 	Remove        bool
 	noTty         bool
-	tty           bool
 	interactive   bool
 	user          string
 	workdir       string
@@ -120,8 +119,8 @@ func (options runOptions) apply(project *types.Project) (*types.Project, error) 
 	return project, nil
 }
 
-func (options runOptions) getEnvironment() (types.Mapping, error) {
-	environment := types.NewMappingWithEquals(options.environment).Resolve(os.LookupEnv).ToMapping()
+func (options runOptions) getEnvironment(resolve func(string) (string, bool)) (types.Mapping, error) {
+	environment := types.NewMappingWithEquals(options.environment).Resolve(resolve).ToMapping()
 	for _, file := range options.envFiles {
 		f, err := os.Open(file)
 		if err != nil {
@@ -143,7 +142,7 @@ func (options runOptions) getEnvironment() (types.Mapping, error) {
 	return environment, nil
 }
 
-func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *cobra.Command {
+func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Compose) *cobra.Command {
 	options := runOptions{
 		composeOptions: &composeOptions{
 			ProjectOptions: p,
@@ -155,6 +154,10 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 	buildOpts := buildOptions{
 		ProjectOptions: p,
 	}
+	// We remove the attribute from the option struct and use a dedicated var, to limit confusion and avoid anyone to use options.tty.
+	// The tty flag is here for convenience and let user do "docker compose run -it" the same way as they use the "docker run" command.
+	var ttyFlag bool
+
 	cmd := &cobra.Command{
 		Use:   "run [OPTIONS] SERVICE [COMMAND] [ARGS...]",
 		Short: "Run a one-off command on a service",
@@ -178,9 +181,16 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 				if cmd.Flags().Changed("no-TTY") {
 					return fmt.Errorf("--tty and --no-TTY can't be used together")
 				} else {
-					options.noTty = !options.tty
+					options.noTty = !ttyFlag
 				}
+			} else if !cmd.Flags().Changed("no-TTY") && !cmd.Flags().Changed("interactive") && !dockerCli.In().IsTerminal() {
+				// while `docker run` requires explicit `-it` flags, Compose enables interactive mode and TTY by default
+				// but when compose is used from a scripr has stdin piped from another command, we just can't
+				// Here, we detect we run "by default" (user didn't passed explicit flags) and disable TTY allocation if
+				// we don't have an actual terminal to attach to for interactive mode
+				options.noTty = true
 			}
+
 			if options.quiet {
 				progress.Mode = progress.ModeQuiet
 				devnull, err := os.Open(os.DevNull)
@@ -238,7 +248,7 @@ func runCommand(p *ProjectOptions, dockerCli command.Cli, backend api.Service) *
 	flags.BoolVar(&options.removeOrphans, "remove-orphans", false, "Remove containers for services not defined in the Compose file")
 
 	cmd.Flags().BoolVarP(&options.interactive, "interactive", "i", true, "Keep STDIN open even if not attached")
-	cmd.Flags().BoolVarP(&options.tty, "tty", "t", true, "Allocate a pseudo-TTY")
+	cmd.Flags().BoolVarP(&ttyFlag, "tty", "t", true, "Allocate a pseudo-TTY")
 	cmd.Flags().MarkHidden("tty") //nolint:errcheck
 
 	flags.SetNormalizeFunc(normalizeRunFlags)
@@ -256,7 +266,7 @@ func normalizeRunFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 	return pflag.NormalizedName(name)
 }
 
-func runRun(ctx context.Context, backend api.Service, project *types.Project, options runOptions, createOpts createOptions, buildOpts buildOptions, dockerCli command.Cli) error {
+func runRun(ctx context.Context, backend api.Compose, project *types.Project, options runOptions, createOpts createOptions, buildOpts buildOptions, dockerCli command.Cli) error {
 	project, err := options.apply(project)
 	if err != nil {
 		return err
@@ -271,22 +281,6 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		return err
 	}
 
-	err = progress.Run(ctx, func(ctx context.Context) error {
-		var buildForDeps *api.BuildOptions
-		if !createOpts.noBuild {
-			// allow dependencies needing build to be implicitly selected
-			bo, err := buildOpts.toAPIBuildOptions(nil)
-			if err != nil {
-				return err
-			}
-			buildForDeps = &bo
-		}
-		return startDependencies(ctx, backend, *project, buildForDeps, options)
-	}, dockerCli.Err())
-	if err != nil {
-		return err
-	}
-
 	labels := types.Labels{}
 	for _, s := range options.labels {
 		parts := strings.SplitN(s, "=", 2)
@@ -298,23 +292,26 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 
 	var buildForRun *api.BuildOptions
 	if !createOpts.noBuild {
-		// dependencies have already been started above, so only the service
-		// being run might need to be built at this point
-		bo, err := buildOpts.toAPIBuildOptions([]string{options.Service})
+		bo, err := buildOpts.toAPIBuildOptions(nil)
 		if err != nil {
 			return err
 		}
 		buildForRun = &bo
 	}
 
-	environment, err := options.getEnvironment()
+	environment, err := options.getEnvironment(project.Environment.Resolve)
 	if err != nil {
 		return err
 	}
 
 	// start container and attach to container streams
 	runOpts := api.RunOptions{
-		Build:             buildForRun,
+		CreateOptions: api.CreateOptions{
+			Build:         buildForRun,
+			RemoveOrphans: options.removeOrphans,
+			IgnoreOrphans: options.ignoreOrphans,
+			QuietPull:     options.quietPull,
+		},
 		Name:              options.name,
 		Service:           options.Service,
 		Command:           options.Command,
@@ -332,7 +329,6 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		UseNetworkAliases: options.useAliases,
 		NoDeps:            options.noDeps,
 		Index:             0,
-		QuietPull:         options.quietPull,
 	}
 
 	for name, service := range project.Services {
@@ -351,35 +347,4 @@ func runRun(ctx context.Context, backend api.Service, project *types.Project, op
 		return cli.StatusError{StatusCode: exitCode, Status: errMsg}
 	}
 	return err
-}
-
-func startDependencies(ctx context.Context, backend api.Service, project types.Project, buildOpts *api.BuildOptions, options runOptions) error {
-	dependencies := types.Services{}
-	var requestedService types.ServiceConfig
-	for name, service := range project.Services {
-		if name != options.Service {
-			dependencies[name] = service
-		} else {
-			requestedService = service
-		}
-	}
-
-	project.Services = dependencies
-	project.DisabledServices[options.Service] = requestedService
-	err := backend.Create(ctx, &project, api.CreateOptions{
-		Build:         buildOpts,
-		IgnoreOrphans: options.ignoreOrphans,
-		RemoveOrphans: options.removeOrphans,
-		QuietPull:     options.quietPull,
-	})
-	if err != nil {
-		return err
-	}
-
-	if len(dependencies) > 0 {
-		return backend.Start(ctx, project.Name, api.StartOptions{
-			Project: &project,
-		})
-	}
-	return nil
 }

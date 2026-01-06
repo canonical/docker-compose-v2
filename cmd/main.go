@@ -20,11 +20,11 @@ import (
 	"os"
 
 	dockercli "github.com/docker/cli/cli"
-	"github.com/docker/cli/cli-plugins/manager"
+	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/compose/v2/cmd/cmdtrace"
-	"github.com/docker/docker/client"
+	"github.com/docker/compose/v2/cmd/prompt"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -35,60 +35,43 @@ import (
 )
 
 func pluginMain() {
-	plugin.Run(func(dockerCli command.Cli) *cobra.Command {
-		// TODO(milas): this cast is safe but we should not need to do this,
-		// 	we should expose the concrete service type so that we do not need
-		// 	to rely on the `api.Service` interface internally
-		backend := compose.NewComposeService(dockerCli).(commands.Backend)
-		cmd := commands.RootCommand(dockerCli, backend)
-		originalPreRunE := cmd.PersistentPreRunE
-		cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-			// initialize the dockerCli instance
-			if err := plugin.PersistentPreRunE(cmd, args); err != nil {
-				return err
-			}
-			// compose-specific initialization
-			dockerCliPostInitialize(dockerCli)
+	plugin.Run(
+		func(cli command.Cli) *cobra.Command {
+			backend := compose.NewComposeService(cli,
+				compose.WithPrompt(prompt.NewPrompt(cli.In(), cli.Out()).Confirm),
+			)
+			cmd := commands.RootCommand(cli, backend)
+			originalPreRunE := cmd.PersistentPreRunE
+			cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+				// initialize the cli instance
+				if err := plugin.PersistentPreRunE(cmd, args); err != nil {
+					return err
+				}
+				if err := cmdtrace.Setup(cmd, cli, os.Args[1:]); err != nil {
+					logrus.Debugf("failed to enable tracing: %v", err)
+				}
 
-			if err := cmdtrace.Setup(cmd, dockerCli, os.Args[1:]); err != nil {
-				logrus.Debugf("failed to enable tracing: %v", err)
+				if originalPreRunE != nil {
+					return originalPreRunE(cmd, args)
+				}
+				return nil
 			}
 
-			if originalPreRunE != nil {
-				return originalPreRunE(cmd, args)
-			}
-			return nil
-		}
-
-		cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
-			return dockercli.StatusError{
-				StatusCode: 1,
-				Status:     err.Error(),
-			}
-		})
-		return cmd
-	},
-		manager.Metadata{
+			cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+				return dockercli.StatusError{
+					StatusCode: 1,
+					Status:     err.Error(),
+				}
+			})
+			return cmd
+		},
+		metadata.Metadata{
 			SchemaVersion: "0.1.0",
 			Vendor:        "Docker Inc.",
 			Version:       internal.Version,
-		})
-}
-
-// dockerCliPostInitialize performs Compose-specific configuration for the
-// command.Cli instance provided by the plugin.Run() initialization.
-//
-// NOTE: This must be called AFTER plugin.PersistentPreRunE.
-func dockerCliPostInitialize(dockerCli command.Cli) {
-	// HACK(milas): remove once docker/cli#4574 is merged; for now,
-	// set it in a rather roundabout way by grabbing the underlying
-	// concrete client and manually invoking an option on it
-	_ = dockerCli.Apply(func(cli *command.DockerCli) error {
-		if mobyClient, ok := cli.Client().(*client.Client); ok {
-			_ = client.WithUserAgent("compose/" + internal.Version)(mobyClient)
-		}
-		return nil
-	})
+		},
+		command.WithUserAgent("compose/"+internal.Version),
+	)
 }
 
 func main() {

@@ -27,16 +27,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/containerd/errdefs"
 	"github.com/docker/cli/cli-plugins/manager"
-	"github.com/docker/cli/cli-plugins/socket"
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 type JsonMessage struct {
@@ -51,6 +50,8 @@ const (
 	DebugType                 = "debug"
 	providerMetadataDirectory = "compose/providers"
 )
+
+var mux sync.Mutex
 
 func (s *composeService) runPlugin(ctx context.Context, project *types.Project, service types.ServiceConfig, command string) error {
 	provider := *service.Provider
@@ -70,6 +71,8 @@ func (s *composeService) runPlugin(ctx context.Context, project *types.Project, 
 		return err
 	}
 
+	mux.Lock()
+	defer mux.Unlock()
 	for name, s := range project.Services {
 		if _, ok := s.DependsOn[service.Name]; ok {
 			prefix := strings.ToUpper(service.Name) + "_"
@@ -161,14 +164,14 @@ func (s *composeService) getPluginBinaryPath(provider string) (path string, err 
 	if err == nil {
 		path = plugin.Path
 	}
-	if manager.IsNotFound(err) {
+	if errdefs.IsNotFound(err) {
 		path, err = exec.LookPath(executable(provider))
 	}
 	return path, err
 }
 
 func (s *composeService) setupPluginCommand(ctx context.Context, project *types.Project, service types.ServiceConfig, path, command string) (*exec.Cmd, error) {
-	cmdOptionsMetadata := s.getPluginMetadata(path, service.Provider.Type)
+	cmdOptionsMetadata := s.getPluginMetadata(path, service.Provider.Type, project)
 	var currentCommandMetadata CommandMetadata
 	switch command {
 	case "up":
@@ -176,13 +179,14 @@ func (s *composeService) setupPluginCommand(ctx context.Context, project *types.
 	case "down":
 		currentCommandMetadata = cmdOptionsMetadata.Down
 	}
-	commandMetadataIsEmpty := len(currentCommandMetadata.Parameters) == 0
+
 	provider := *service.Provider
+	commandMetadataIsEmpty := cmdOptionsMetadata.IsEmpty()
 	if err := currentCommandMetadata.CheckRequiredParameters(provider); !commandMetadataIsEmpty && err != nil {
 		return nil, err
 	}
 
-	args := []string{"compose", "--project-name", project.Name, command}
+	args := []string{"compose", fmt.Sprintf("--project-name=%s", project.Name), command}
 	for k, v := range provider.Options {
 		for _, value := range v {
 			if _, ok := currentCommandMetadata.GetParameter(k); commandMetadataIsEmpty || ok {
@@ -193,34 +197,21 @@ func (s *composeService) setupPluginCommand(ctx context.Context, project *types.
 	args = append(args, service.Name)
 
 	cmd := exec.CommandContext(ctx, path, args...)
-	// exec provider command with same environment Compose is running
-	env := types.NewMapping(os.Environ())
-	// but remove DOCKER_CLI_PLUGIN... variable so plugin can detect it run standalone
-	delete(env, manager.ReexecEnvvar)
-	// and add the explicit environment variables set for service
-	for key, val := range service.Environment.RemoveEmpty().ToMapping() {
-		env[key] = val
+
+	err := s.prepareShellOut(ctx, project.Environment, cmd)
+	if err != nil {
+		return nil, err
 	}
-	cmd.Env = env.Values()
-
-	// Use docker/cli mechanism to propagate termination signal to child process
-	server, err := socket.NewPluginServer(nil)
-	if err == nil {
-		defer server.Close() //nolint:errcheck
-		cmd.Env = replace(cmd.Env, socket.EnvKey, server.Addr().String())
-	}
-
-	cmd.Env = append(cmd.Env, fmt.Sprintf("DOCKER_CONTEXT=%s", s.dockerCli.CurrentContext()))
-
-	// propagate opentelemetry context to child process, see https://github.com/open-telemetry/oteps/blob/main/text/0258-env-context-baggage-carriers.md
-	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, &carrier)
-	cmd.Env = append(cmd.Env, types.Mapping(carrier).Values()...)
 	return cmd, nil
 }
 
-func (s *composeService) getPluginMetadata(path, command string) ProviderMetadata {
+func (s *composeService) getPluginMetadata(path, command string, project *types.Project) ProviderMetadata {
 	cmd := exec.Command(path, "compose", "metadata")
+	err := s.prepareShellOut(context.Background(), project.Environment, cmd)
+	if err != nil {
+		logrus.Debugf("failed to prepare plugin metadata command: %v", err)
+		return ProviderMetadata{}
+	}
 	stdout := &bytes.Buffer{}
 	cmd.Stdout = stdout
 
@@ -253,6 +244,10 @@ type ProviderMetadata struct {
 	Description string          `json:"description"`
 	Up          CommandMetadata `json:"up"`
 	Down        CommandMetadata `json:"down"`
+}
+
+func (p ProviderMetadata) IsEmpty() bool {
+	return p.Description == "" && p.Up.Parameters == nil && p.Down.Parameters == nil
 }
 
 type CommandMetadata struct {

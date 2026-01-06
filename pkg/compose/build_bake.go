@@ -20,10 +20,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,20 +34,19 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/containerd/errdefs"
 	"github.com/docker/cli/cli-plugins/manager"
-	"github.com/docker/cli/cli-plugins/socket"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/image/build"
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/builder/remotecontext/urlutil"
+	"github.com/google/uuid"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/util/gitutil"
+	gitutil "github.com/moby/buildkit/frontend/dockerfile/dfgitutil"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -59,6 +60,9 @@ func buildWithBake(dockerCli command.Cli) (bool, error) {
 		return false, err
 	}
 	if !bake {
+		if ok {
+			logrus.Warnf("COMPOSE_BAKE=false is deprecated, support for internal compose builder will be removed in next release")
+		}
 		return false, nil
 	}
 
@@ -73,7 +77,7 @@ func buildWithBake(dockerCli command.Cli) (bool, error) {
 
 	_, err = manager.GetPlugin("buildx", dockerCli, &cobra.Command{})
 	if err != nil {
-		if manager.IsNotFound(err) {
+		if errdefs.IsNotFound(err) {
 			logrus.Warnf("Docker Compose is configured to build using Bake, but buildx isn't installed")
 			return false, nil
 		}
@@ -116,6 +120,7 @@ type bakeTarget struct {
 	Entitlements     []string          `json:"entitlements,omitempty"`
 	ExtraHosts       map[string]string `json:"extra-hosts,omitempty"`
 	Outputs          []string          `json:"output,omitempty"`
+	Attest           []string          `json:"attest,omitempty"`
 }
 
 type bakeMetadata map[string]buildStatus
@@ -128,7 +133,18 @@ type buildStatus struct {
 func (s *composeService) doBuildBake(ctx context.Context, project *types.Project, serviceToBeBuild types.Services, options api.BuildOptions) (map[string]string, error) { //nolint:gocyclo
 	eg := errgroup.Group{}
 	ch := make(chan *client.SolveStatus)
-	display, err := progressui.NewDisplay(os.Stdout, progressui.DisplayMode(options.Progress))
+	if options.Progress == progress.ModeAuto {
+		options.Progress = os.Getenv("BUILDKIT_PROGRESS")
+	}
+	displayMode := progressui.DisplayMode(options.Progress)
+	out := options.Out
+	if out == nil {
+		if displayMode == progress.ModeAuto && !s.dockerCli.Out().IsTerminal() {
+			displayMode = progressui.PlainMode
+		}
+		out = os.Stdout // should be s.dockerCli.Out(), but NewDisplay require access to the underlying *File
+	}
+	display, err := progressui.NewDisplay(out, displayMode)
 	if err != nil {
 		return nil, err
 	}
@@ -142,10 +158,11 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		Targets: map[string]bakeTarget{},
 	}
 	var (
-		group      bakeGroup
-		privileged bool
-		read       []string
-		targets    = make(map[string]string, len(serviceToBeBuild)) // service name -> build target
+		group          bakeGroup
+		privileged     bool
+		read           []string
+		expectedImages = make(map[string]string, len(serviceToBeBuild)) // service name -> expected image
+		targets        = make(map[string]string, len(serviceToBeBuild)) // service name -> build target
 	)
 
 	// produce a unique ID for service used as bake target
@@ -160,18 +177,17 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		}
 	}
 
+	var secretsEnv []string
 	for serviceName, service := range project.Services {
 		if service.Build == nil {
 			continue
 		}
 		build := *service.Build
+		labels := getImageBuildLabels(project, service)
 
-		args := types.Mapping{}
-		for k, v := range resolveAndMergeBuildArgs(s.dockerCli, project, service, options) {
-			if v == nil {
-				continue
-			}
-			args[k] = *v
+		args := resolveAndMergeBuildArgs(s.dockerCli, project, service, options).ToMapping()
+		for k, v := range args {
+			args[k] = strings.ReplaceAll(v, "${", "$${")
 		}
 
 		entitlements := build.Entitlements
@@ -192,35 +208,50 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		case len(service.Build.Platforms) > 1:
 			outputs = []string{fmt.Sprintf("type=image,push=%t", push)}
 		default:
-			outputs = []string{fmt.Sprintf("type=docker,load=true,push=%t", push)}
+			if push {
+				outputs = []string{"type=registry"}
+			} else {
+				outputs = []string{"type=docker"}
+			}
 		}
 
 		read = append(read, build.Context)
 		for _, path := range build.AdditionalContexts {
-			_, err := gitutil.ParseGitRef(path)
+			_, _, err := gitutil.ParseGitRef(path)
 			if !strings.Contains(path, "://") && err != nil {
 				read = append(read, path)
 			}
 		}
 
+		image := api.GetImageNameOrDefault(service, project.Name)
+		expectedImages[serviceName] = image
+
+		pull := service.Build.Pull || options.Pull
+		noCache := service.Build.NoCache || options.NoCache
+
 		target := targets[serviceName]
+
+		secrets, env := toBakeSecrets(project, build.Secrets)
+		secretsEnv = append(secretsEnv, env...)
+
 		cfg.Targets[target] = bakeTarget{
 			Context:          build.Context,
 			Contexts:         additionalContexts(build.AdditionalContexts, targets),
 			Dockerfile:       dockerFilePath(build.Context, build.Dockerfile),
 			DockerfileInline: strings.ReplaceAll(build.DockerfileInline, "${", "$${"),
 			Args:             args,
-			Labels:           build.Labels,
-			Tags:             append(build.Tags, api.GetImageNameOrDefault(service, project.Name)),
+			Labels:           labels,
+			Tags:             append(build.Tags, image),
 
-			CacheFrom: build.CacheFrom,
-			// CacheTo:    TODO
+			CacheFrom:    build.CacheFrom,
+			CacheTo:      build.CacheTo,
+			NetworkMode:  build.Network,
 			Platforms:    build.Platforms,
 			Target:       build.Target,
-			Secrets:      toBakeSecrets(project, build.Secrets),
+			Secrets:      secrets,
 			SSH:          toBakeSSH(append(build.SSH, options.SSHs...)),
-			Pull:         options.Pull,
-			NoCache:      options.NoCache,
+			Pull:         pull,
+			NoCache:      noCache,
 			ShmSize:      build.ShmSize,
 			Ulimits:      toBakeUlimits(build.Ulimits),
 			Entitlements: entitlements,
@@ -228,6 +259,7 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 
 			Outputs: outputs,
 			Call:    call,
+			Attest:  toBakeAttest(build),
 		}
 	}
 
@@ -252,13 +284,20 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 	}
 	logrus.Debugf("bake build config:\n%s", string(b))
 
+	tmpdir := os.TempDir()
 	var metadataFile string
 	for {
 		// we don't use os.CreateTemp here as we need a temporary file name, but don't want it actually created
 		// as bake relies on atomicwriter and this creates conflict during rename
-		metadataFile = filepath.Join(os.TempDir(), fmt.Sprintf("compose-build-metadataFile-%d.json", rand.Int31()))
-		if _, err = os.Stat(metadataFile); os.IsNotExist(err) {
-			break
+		metadataFile = filepath.Join(tmpdir, fmt.Sprintf("compose-build-metadataFile-%s.json", uuid.New().String()))
+		if _, err = os.Stat(metadataFile); err != nil {
+			if os.IsNotExist(err) {
+				break
+			}
+			var pathError *fs.PathError
+			if errors.As(err, &pathError) {
+				return nil, fmt.Errorf("can't acces os.tempDir %s: %w", tmpdir, pathError.Err)
+			}
 		}
 	}
 	defer func() {
@@ -270,16 +309,23 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 		return nil, err
 	}
 
+	if versions.LessThan(buildx.Version[1:], "0.17.0") {
+		return nil, fmt.Errorf("compose build requires buildx 0.17 or later")
+	}
+
 	args := []string{"bake", "--file", "-", "--progress", "rawjson", "--metadata-file", metadataFile}
-	mustAllow := buildx.Version != "" && versions.GreaterThanOrEqualTo(buildx.Version[1:], "0.17.0")
-	if mustAllow {
-		// FIXME we should prompt user about this, but this is a breaking change in UX
-		for _, path := range read {
-			args = append(args, "--allow", "fs.read="+path)
-		}
-		if privileged {
-			args = append(args, "--allow", "security.insecure")
-		}
+	// FIXME we should prompt user about this, but this is a breaking change in UX
+	for _, path := range read {
+		args = append(args, "--allow", "fs.read="+path)
+	}
+	if privileged {
+		args = append(args, "--allow", "security.insecure")
+	}
+	if options.SBOM != "" {
+		args = append(args, "--sbom="+options.SBOM)
+	}
+	if options.Provenance != "" {
+		args = append(args, "--provenance="+options.Provenance)
 	}
 
 	if options.Builder != "" {
@@ -291,23 +337,22 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 
 	logrus.Debugf("Executing bake with args: %v", args)
 
-	cmd := exec.CommandContext(ctx, buildx.Path, args...)
-	// Remove DOCKER_CLI_PLUGIN... variable so buildx can detect it run standalone
-	cmd.Env = filter(os.Environ(), manager.ReexecEnvvar)
-
-	// Use docker/cli mechanism to propagate termination signal to child process
-	server, err := socket.NewPluginServer(nil)
-	if err == nil {
-		defer server.Close() //nolint:errcheck
-		cmd.Env = replace(cmd.Env, socket.EnvKey, server.Addr().String())
+	if s.dryRun {
+		return dryRunBake(ctx, cfg), nil
 	}
+	cmd := exec.CommandContext(ctx, buildx.Path, args...)
 
-	cmd.Env = append(cmd.Env, fmt.Sprintf("DOCKER_CONTEXT=%s", s.dockerCli.CurrentContext()))
-
-	// propagate opentelemetry context to child process, see https://github.com/open-telemetry/oteps/blob/main/text/0258-env-context-baggage-carriers.md
-	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, &carrier)
-	cmd.Env = append(cmd.Env, types.Mapping(carrier).Values()...)
+	err = s.prepareShellOut(ctx, types.NewMapping(os.Environ()), cmd)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, cleanup, err := s.propagateDockerEndpoint()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = append(cmd.Env, endpoint...)
+	cmd.Env = append(cmd.Env, secretsEnv...)
+	defer cleanup()
 
 	cmd.Stdout = s.stdout()
 	cmd.Stdin = bytes.NewBuffer(b)
@@ -317,16 +362,25 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 	}
 
 	var errMessage []string
-	scanner := bufio.NewScanner(pipe)
-	scanner.Split(bufio.ScanLines)
+	reader := bufio.NewReader(pipe)
 
 	err = cmd.Start()
 	if err != nil {
 		return nil, err
 	}
 	eg.Go(cmd.Wait)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			if errors.Is(readErr, os.ErrClosed) {
+				logrus.Debugf("bake stopped")
+				break
+			}
+			return nil, fmt.Errorf("failed to execute bake: %w", readErr)
+		}
 		decoder := json.NewDecoder(strings.NewReader(line))
 		var status client.SolveStatus
 		err := decoder.Decode(&status)
@@ -364,13 +418,14 @@ func (s *composeService) doBuildBake(ctx context.Context, project *types.Project
 	cw := progress.ContextWriter(ctx)
 	results := map[string]string{}
 	for name := range serviceToBeBuild {
+		image := expectedImages[name]
 		target := targets[name]
 		built, ok := md[target]
 		if !ok {
 			return nil, fmt.Errorf("build result not found in Bake metadata for service %s", name)
 		}
-		results[name] = built.Digest
-		cw.Event(progress.BuiltEvent(name))
+		results[image] = built.Digest
+		cw.Event(progress.BuiltEvent(image))
 	}
 	return results, nil
 }
@@ -414,8 +469,9 @@ func toBakeSSH(ssh types.SSHConfig) []string {
 	return s
 }
 
-func toBakeSecrets(project *types.Project, secrets []types.ServiceSecretConfig) []string {
+func toBakeSecrets(project *types.Project, secrets []types.ServiceSecretConfig) ([]string, []string) {
 	var s []string
+	var env []string
 	for _, ref := range secrets {
 		def := project.Secrets[ref.Source]
 		target := ref.Target
@@ -424,43 +480,80 @@ func toBakeSecrets(project *types.Project, secrets []types.ServiceSecretConfig) 
 		}
 		switch {
 		case def.Environment != "":
+			env = append(env, fmt.Sprintf("%s=%s", def.Environment, project.Environment[def.Environment]))
 			s = append(s, fmt.Sprintf("id=%s,type=env,env=%s", target, def.Environment))
 		case def.File != "":
 			s = append(s, fmt.Sprintf("id=%s,type=file,src=%s", target, def.File))
 		}
 	}
-	return s
+	return s, env
 }
 
-func filter(environ []string, variable string) []string {
-	prefix := variable + "="
-	filtered := make([]string, 0, len(environ))
-	for _, val := range environ {
-		if !strings.HasPrefix(val, prefix) {
-			filtered = append(filtered, val)
+func toBakeAttest(build types.BuildConfig) []string {
+	var attests []string
+
+	// Handle per-service provenance configuration (only from build config, not global options)
+	if build.Provenance != "" {
+		if build.Provenance == "true" {
+			attests = append(attests, "type=provenance")
+		} else if build.Provenance != "false" {
+			attests = append(attests, fmt.Sprintf("type=provenance,%s", build.Provenance))
 		}
 	}
-	return filtered
-}
 
-func replace(environ []string, variable, value string) []string {
-	filtered := filter(environ, variable)
-	return append(filtered, fmt.Sprintf("%s=%s", variable, value))
+	// Handle per-service SBOM configuration (only from build config, not global options)
+	if build.SBOM != "" {
+		if build.SBOM == "true" {
+			attests = append(attests, "type=sbom")
+		} else if build.SBOM != "false" {
+			attests = append(attests, fmt.Sprintf("type=sbom,%s", build.SBOM))
+		}
+	}
+
+	return attests
 }
 
 func dockerFilePath(ctxName string, dockerfile string) string {
 	if dockerfile == "" {
 		return ""
 	}
-	if urlutil.IsGitURL(ctxName) {
+	if contextType, _ := build.DetectContextType(ctxName); contextType == build.ContextTypeGit {
 		return dockerfile
 	}
 	if !filepath.IsAbs(dockerfile) {
 		dockerfile = filepath.Join(ctxName, dockerfile)
 	}
-	symlinks, err := filepath.EvalSymlinks(dockerfile)
+	dir := filepath.Dir(dockerfile)
+	symlinks, err := filepath.EvalSymlinks(dir)
 	if err == nil {
-		return symlinks
+		return filepath.Join(symlinks, filepath.Base(dockerfile))
 	}
 	return dockerfile
+}
+
+func dryRunBake(ctx context.Context, cfg bakeConfig) map[string]string {
+	w := progress.ContextWriter(ctx)
+	bakeResponse := map[string]string{}
+	for name, target := range cfg.Targets {
+		dryRunUUID := fmt.Sprintf("dryRun-%x", sha1.Sum([]byte(name)))
+		displayDryRunBuildEvent(w, name, dryRunUUID, target.Tags[0])
+		bakeResponse[name] = dryRunUUID
+	}
+	for name := range bakeResponse {
+		w.Event(progress.BuiltEvent(name))
+	}
+	return bakeResponse
+}
+
+func displayDryRunBuildEvent(w progress.Writer, name string, dryRunUUID, tag string) {
+	w.Event(progress.Event{
+		ID:     name + " ==>",
+		Status: progress.Done,
+		Text:   fmt.Sprintf("==> writing image %s", dryRunUUID),
+	})
+	w.Event(progress.Event{
+		ID:     name + " ==> ==>",
+		Status: progress.Done,
+		Text:   fmt.Sprintf(`naming to %s`, tag),
+	})
 }

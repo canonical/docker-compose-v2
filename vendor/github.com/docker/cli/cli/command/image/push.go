@@ -15,12 +15,11 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/streams"
+	"github.com/docker/cli/cli/trust"
 	"github.com/docker/cli/internal/jsonstream"
 	"github.com/docker/cli/internal/tui"
 	"github.com/docker/docker/api/types/auxprogress"
 	"github.com/docker/docker/api/types/image"
-	registrytypes "github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/registry"
 	"github.com/morikuni/aec"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -36,7 +35,14 @@ type pushOptions struct {
 }
 
 // NewPushCommand creates a new `docker push` command
-func NewPushCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewPushCommand(dockerCLI command.Cli) *cobra.Command {
+	return newPushCommand(dockerCLI)
+}
+
+// newPushCommand creates a new `docker push` command
+func newPushCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts pushOptions
 
 	cmd := &cobra.Command{
@@ -45,19 +51,19 @@ func NewPushCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.remote = args[0]
-			return runPush(cmd.Context(), dockerCli, opts)
+			return runPush(cmd.Context(), dockerCLI, opts)
 		},
 		Annotations: map[string]string{
 			"category-top": "6",
 			"aliases":      "docker image push, docker push",
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli, 1),
+		ValidArgsFunction: completion.ImageNames(dockerCLI, 1),
 	}
 
 	flags := cmd.Flags()
 	flags.BoolVarP(&opts.all, "all-tags", "a", false, "Push all tags of an image to the repository")
 	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Suppress verbose output")
-	command.AddTrustSigningFlags(flags, &opts.untrusted, dockerCli.ContentTrustEnabled())
+	flags.BoolVar(&opts.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image signing")
 
 	// Don't default to DOCKER_DEFAULT_PLATFORM env variable, always default to
 	// pushing the image as-is. This also avoids forcing the platform selection
@@ -92,9 +98,11 @@ To push the complete multi-platform image, remove the --platform flag.
 	}
 
 	ref, err := reference.ParseNormalizedNamed(opts.remote)
-	switch {
-	case err != nil:
+	if err != nil {
 		return err
+	}
+
+	switch {
 	case opts.all && !reference.IsNameOnly(ref):
 		return errors.New("tag can't be used with --all-tags/-a")
 	case !opts.all && reference.IsNameOnly(ref):
@@ -104,44 +112,37 @@ To push the complete multi-platform image, remove the --platform flag.
 		}
 	}
 
-	// Resolve the Repository name from fqn to RepositoryInfo
-	repoInfo, _ := registry.ParseRepositoryInfo(ref)
-
 	// Resolve the Auth config relevant for this server
-	authConfig := command.ResolveAuthConfig(dockerCli.ConfigFile(), repoInfo.Index)
-	encodedAuth, err := registrytypes.EncodeAuthConfig(authConfig)
+	encodedAuth, err := command.RetrieveAuthTokenFromImage(dockerCli.ConfigFile(), ref.String())
 	if err != nil {
 		return err
 	}
-	requestPrivilege := command.RegistryAuthenticationPrivilegedFunc(dockerCli, repoInfo.Index, "push")
-	options := image.PushOptions{
+
+	responseBody, err := dockerCli.Client().ImagePush(ctx, reference.FamiliarString(ref), image.PushOptions{
 		All:           opts.all,
 		RegistryAuth:  encodedAuth,
-		PrivilegeFunc: requestPrivilege,
+		PrivilegeFunc: nil,
 		Platform:      platform,
-	}
-
-	responseBody, err := dockerCli.Client().ImagePush(ctx, reference.FamiliarString(ref), options)
+	})
 	if err != nil {
 		return err
 	}
 
 	defer func() {
+		_ = responseBody.Close()
 		for _, note := range notes {
 			out.PrintNote(note)
 		}
 	}()
 
-	defer responseBody.Close()
 	if !opts.untrusted {
-		// TODO pushTrustedReference currently doesn't respect `--quiet`
-		return pushTrustedReference(ctx, dockerCli, repoInfo, ref, authConfig, responseBody)
+		return pushTrustedReference(ctx, dockerCli, ref, responseBody)
 	}
 
 	if opts.quiet {
 		err = jsonstream.Display(ctx, responseBody, streams.NewOut(io.Discard), jsonstream.WithAuxCallback(handleAux()))
 		if err == nil {
-			fmt.Fprintln(dockerCli.Out(), ref.String())
+			_, _ = fmt.Fprintln(dockerCli.Out(), ref.String())
 		}
 		return err
 	}

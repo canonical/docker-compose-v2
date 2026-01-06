@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/docker/buildx/build"
 	"github.com/docker/buildx/builder"
-	"github.com/docker/buildx/controller/pb"
 	"github.com/docker/buildx/store/storeutil"
 	"github.com/docker/buildx/util/buildflags"
 	xprogress "github.com/docker/buildx/util/progress"
@@ -79,16 +79,19 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		policy = types.IncludeDependencies
 	}
 
-	var err error
-	if len(options.Services) > 0 {
-		// As user requested some services to be built, also include those used as additional_contexts
-		options.Services = addBuildDependencies(options.Services, project)
-		// Some build dependencies we just introduced may not be enabled
-		project, err = project.WithServicesEnabled(options.Services...)
-		if err != nil {
-			return nil, err
-		}
+	if len(options.Services) == 0 {
+		options.Services = project.ServiceNames()
 	}
+
+	// also include services used as additional_contexts with service: prefix
+	options.Services = addBuildDependencies(options.Services, project)
+	// Some build dependencies we just introduced may not be enabled
+	var err error
+	project, err = project.WithServicesEnabled(options.Services...)
+	if err != nil {
+		return nil, err
+	}
+
 	project, err = project.WithSelectedServices(options.Services)
 	if err != nil {
 		return nil, err
@@ -173,7 +176,7 @@ func (s *composeService) build(ctx context.Context, project *types.Project, opti
 		if options.Quiet {
 			options.Progress = progress.ModeQuiet
 		}
-		if options.Progress == "" {
+		if options.Progress == progress.ModeAuto {
 			options.Progress = os.Getenv("BUILDKIT_PROGRESS")
 		}
 		w, err = xprogress.NewPrinter(progressCtx, os.Stdout, progressui.DisplayMode(options.Progress),
@@ -398,6 +401,7 @@ func resolveAndMergeBuildArgs(dockerCli command.Cli, project *types.Project, ser
 	return result
 }
 
+//nolint:gocyclo
 func (s *composeService) toBuildOptions(project *types.Project, service types.ServiceConfig, options api.BuildOptions) (build.Options, error) {
 	plats, err := parsePlatforms(service)
 	if err != nil {
@@ -472,8 +476,19 @@ func (s *composeService) toBuildOptions(project *types.Project, service types.Se
 	}
 
 	attests := map[string]*string{}
-	if !options.Provenance {
-		attests["provenance"] = nil
+	if options.Attestations {
+		if service.Build.Provenance != "" {
+			attests["provenance"] = attestation(service.Build.Provenance, "provenance")
+		}
+		if service.Build.SBOM != "" {
+			attests["sbom"] = attestation(service.Build.SBOM, "sbom")
+		}
+	}
+	if options.Provenance != "" {
+		attests["provenance"] = attestation(options.Provenance, "provenance")
+	}
+	if options.SBOM != "" {
+		attests["sbom"] = attestation(options.SBOM, "sbom")
 	}
 
 	return build.Options{
@@ -483,8 +498,8 @@ func (s *composeService) toBuildOptions(project *types.Project, service types.Se
 			DockerfilePath:   dockerFilePath(service.Build.Context, service.Build.Dockerfile),
 			NamedContexts:    toBuildContexts(service, project),
 		},
-		CacheFrom:    pb.CreateCaches(cacheFrom.ToPB()),
-		CacheTo:      pb.CreateCaches(cacheTo.ToPB()),
+		CacheFrom:    build.CreateCaches(cacheFrom),
+		CacheTo:      build.CreateCaches(cacheTo),
 		NoCache:      service.Build.NoCache,
 		Pull:         service.Build.Pull,
 		BuildArgs:    flatten(resolveAndMergeBuildArgs(s.dockerCli, project, service, options)),
@@ -501,6 +516,16 @@ func (s *composeService) toBuildOptions(project *types.Project, service types.Se
 		SourcePolicy: sp,
 		Attests:      attests,
 	}, nil
+}
+
+func attestation(attest string, val string) *string {
+	if b, err := strconv.ParseBool(val); err == nil {
+		s := fmt.Sprintf("type=%s,disabled=%t", attest, b)
+		return &s
+	} else {
+		s := fmt.Sprintf("type=%s,%s", attest, val)
+		return &s
+	}
 }
 
 func toUlimitOpt(ulimits map[string]*types.UlimitsConfig) *cliopts.UlimitOpt {

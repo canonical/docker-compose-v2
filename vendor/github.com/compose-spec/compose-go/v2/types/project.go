@@ -32,8 +32,8 @@ import (
 	"github.com/compose-spec/compose-go/v2/utils"
 	"github.com/distribution/reference"
 	godigest "github.com/opencontainers/go-digest"
+	"go.yaml.in/yaml/v3"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/yaml.v3"
 )
 
 // Project is the result of loading a set of compose files
@@ -47,6 +47,7 @@ type Project struct {
 	Volumes    Volumes    `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	Secrets    Secrets    `yaml:"secrets,omitempty" json:"secrets,omitempty"`
 	Configs    Configs    `yaml:"configs,omitempty" json:"configs,omitempty"`
+	Models     Models     `yaml:"models,omitempty" json:"models,omitempty"`
 	Extensions Extensions `yaml:"#extensions,inline,omitempty" json:"-"` // https://github.com/golang/go/issues/6213
 
 	ComposeFiles []string `yaml:"-" json:"-"`
@@ -117,6 +118,16 @@ func (p *Project) ConfigNames() []string {
 	return names
 }
 
+// ModelNames return names for all models in this Compose config
+func (p *Project) ModelNames() []string {
+	var names []string
+	for k := range p.Models {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (p *Project) ServicesWithBuild() []string {
 	servicesBuild := p.Services.Filter(func(s ServiceConfig) bool {
 		return s.Build != nil && s.Build.Context != ""
@@ -136,6 +147,11 @@ func (p *Project) ServicesWithDependsOn() []string {
 		return len(s.DependsOn) > 0
 	})
 	return slices.Collect(maps.Keys(servicesDependsOn))
+}
+
+func (p *Project) ServicesWithModels() []string {
+	servicesModels := p.Services.Filter(func(s ServiceConfig) bool { return len(s.Models) > 0 })
+	return slices.Collect(maps.Keys(servicesModels))
 }
 
 func (p *Project) ServicesWithCapabilities() ([]string, []string, []string) {
@@ -411,6 +427,7 @@ func (p *Project) WithoutUnnecessaryResources() *Project {
 	requiredVolumes := map[string]struct{}{}
 	requiredSecrets := map[string]struct{}{}
 	requiredConfigs := map[string]struct{}{}
+	requiredModels := map[string]struct{}{}
 	for _, s := range newProject.Services {
 		for k := range s.Networks {
 			requiredNetworks[k] = struct{}{}
@@ -431,6 +448,9 @@ func (p *Project) WithoutUnnecessaryResources() *Project {
 		}
 		for _, v := range s.Configs {
 			requiredConfigs[v.Source] = struct{}{}
+		}
+		for m := range s.Models {
+			requiredModels[m] = struct{}{}
 		}
 	}
 
@@ -465,6 +485,14 @@ func (p *Project) WithoutUnnecessaryResources() *Project {
 		}
 	}
 	newProject.Configs = configs
+
+	models := Models{}
+	for k := range requiredModels {
+		if value, ok := p.Models[k]; ok {
+			models[k] = value
+		}
+	}
+	newProject.Models = models
 	return newProject
 }
 

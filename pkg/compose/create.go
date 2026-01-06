@@ -30,13 +30,12 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/paths"
 	"github.com/compose-spec/compose-go/v2/types"
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/blkiodev"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/api/types/versions"
 	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/go-connections/nat"
@@ -45,7 +44,6 @@ import (
 
 	"github.com/docker/compose/v2/pkg/api"
 	"github.com/docker/compose/v2/pkg/progress"
-	"github.com/docker/compose/v2/pkg/prompt"
 )
 
 type createOptions struct {
@@ -83,6 +81,11 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 		return err
 	}
 
+	err = s.ensureModels(ctx, project, options.QuietPull)
+	if err != nil {
+		return err
+	}
+
 	prepareNetworks(project)
 
 	networks, err := s.ensureNetworks(ctx, project)
@@ -114,6 +117,13 @@ func (s *composeService) create(ctx context.Context, project *types.Project, opt
 				"--remove-orphans flag to clean it up.", orphans.names())
 		}
 	}
+
+	// Temporary implementation of use_api_socket until we get actual support inside docker engine
+	project, err = s.useAPISocket(project)
+	if err != nil {
+		return err
+	}
+
 	return newConvergence(options.Services, observedState, networks, volumes, s).apply(ctx, project, options)
 }
 
@@ -169,15 +179,12 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 		return createConfigs{}, err
 	}
 
-	var (
-		runCmd     strslice.StrSlice
-		entrypoint strslice.StrSlice
-	)
+	var runCmd, entrypoint []string
 	if service.Command != nil {
-		runCmd = strslice.StrSlice(service.Command)
+		runCmd = service.Command
 	}
 	if service.Entrypoint != nil {
-		entrypoint = strslice.StrSlice(service.Entrypoint)
+		entrypoint = service.Entrypoint
 	}
 
 	var (
@@ -274,8 +281,8 @@ func (s *composeService) getCreateConfigs(ctx context.Context,
 		Annotations:    service.Annotations,
 		Binds:          binds,
 		Mounts:         mounts,
-		CapAdd:         strslice.StrSlice(service.CapAdd),
-		CapDrop:        strslice.StrSlice(service.CapDrop),
+		CapAdd:         service.CapAdd,
+		CapDrop:        service.CapDrop,
 		NetworkMode:    networkMode,
 		Init:           service.Init,
 		IpcMode:        container.IpcMode(service.Ipc),
@@ -1254,7 +1261,7 @@ func (s *composeService) ensureNetwork(ctx context.Context, project *types.Proje
 	}
 
 	id, err := s.resolveOrCreateNetwork(ctx, project, name, n)
-	if cerrdefs.IsConflict(err) {
+	if errdefs.IsConflict(err) {
 		// Maybe another execution of `docker compose up|run` created same network
 		// let's retry once
 		return s.resolveOrCreateNetwork(ctx, project, name, n)
@@ -1420,7 +1427,7 @@ func (s *composeService) removeDivergedNetwork(ctx context.Context, project *typ
 	err := s.stop(ctx, project.Name, api.StopOptions{
 		Services: services,
 		Project:  project,
-	})
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1489,7 +1496,7 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 		sn, err := s.apiClient().NetworkInspect(ctx, n.Name, network.InspectOptions{})
 		if err == nil {
 			networks = append(networks, sn)
-		} else if !cerrdefs.IsNotFound(err) {
+		} else if !errdefs.IsNotFound(err) {
 			return "", err
 		}
 
@@ -1526,7 +1533,7 @@ func (s *composeService) resolveExternalNetwork(ctx context.Context, n *types.Ne
 func (s *composeService) ensureVolume(ctx context.Context, name string, volume types.VolumeConfig, project *types.Project, assumeYes bool) (string, error) {
 	inspected, err := s.apiClient().VolumeInspect(ctx, volume.Name)
 	if err != nil {
-		if !cerrdefs.IsNotFound(err) {
+		if !errdefs.IsNotFound(err) {
 			return "", err
 		}
 		if volume.External {
@@ -1558,7 +1565,7 @@ func (s *composeService) ensureVolume(ctx context.Context, name string, volume t
 		confirm := assumeYes
 		if !assumeYes {
 			msg := fmt.Sprintf("Volume %q exists but doesn't match configuration in compose file. Recreate (data will be lost)?", volume.Name)
-			confirm, err = prompt.NewPrompt(s.stdin(), s.stdout()).Confirm(msg, false)
+			confirm, err = s.prompt(msg, false)
 			if err != nil {
 				return "", err
 			}
@@ -1591,7 +1598,7 @@ func (s *composeService) removeDivergedVolume(ctx context.Context, name string, 
 	err := s.stop(ctx, project.Name, api.StopOptions{
 		Services: services,
 		Project:  project,
-	})
+	}, nil)
 	if err != nil {
 		return err
 	}
@@ -1615,7 +1622,7 @@ func (s *composeService) removeDivergedVolume(ctx context.Context, name string, 
 }
 
 func (s *composeService) createVolume(ctx context.Context, volume types.VolumeConfig) error {
-	eventName := fmt.Sprintf("Volume %q", volume.Name)
+	eventName := fmt.Sprintf("Volume %s", volume.Name)
 	w := progress.ContextWriter(ctx)
 	w.Event(progress.CreatingEvent(eventName))
 	hash, err := VolumeHash(volume)

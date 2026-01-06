@@ -175,7 +175,7 @@ func TestUpWithAllResources(t *testing.T) {
 	})
 
 	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/resources/compose.yaml", "--all-resources", "--project-name", projectName, "up")
-	assert.Assert(t, strings.Contains(res.Combined(), fmt.Sprintf(`Volume "%s_my_vol"  Created`, projectName)), res.Combined())
+	assert.Assert(t, strings.Contains(res.Combined(), fmt.Sprintf(`Volume %s_my_vol  Created`, projectName)), res.Combined())
 	assert.Assert(t, strings.Contains(res.Combined(), fmt.Sprintf(`Network %s_my_net  Created`, projectName)), res.Combined())
 }
 
@@ -205,4 +205,21 @@ func TestUpImageID(t *testing.T) {
 
 	c = NewCLI(t, WithEnv(fmt.Sprintf("ID=%s", id)))
 	c.RunDockerComposeCmd(t, "-f", "./fixtures/simple-composefile/id.yaml", "--project-name", projectName, "up")
+}
+
+func TestUpStopWithLogsMixed(t *testing.T) {
+	c := NewCLI(t)
+	const projectName = "compose-e2e-stop-logs"
+
+	t.Cleanup(func() {
+		c.RunDockerComposeCmd(t, "--project-name", projectName, "down", "-v")
+	})
+
+	res := c.RunDockerComposeCmd(t, "-f", "./fixtures/stop/compose.yaml", "--project-name", projectName, "up", "--abort-on-container-exit")
+	// assert we still get service2 logs after service 1 Stopped event
+	res.Assert(t, icmd.Expected{
+		Err: "Container compose-e2e-stop-logs-service1-1  Stopped",
+	})
+	// assert we get stop hook logs
+	res.Assert(t, icmd.Expected{Out: "service2-1 ->  | stop hook running...\nservice2-1     | 64 bytes"})
 }

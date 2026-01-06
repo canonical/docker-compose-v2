@@ -156,9 +156,8 @@ jobs:
           - plugin
           - standalone
         engine:
-          - 26
-          - 27
-          - 28
+          - 27 # old stable (latest major - 1)
+          - 28 # current stable
     steps:
       - name: Prepare
         run: |
@@ -183,12 +182,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up Docker Model
+        run: |
+          sudo apt-get install docker-model-plugin
+          docker model version
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           check-latest: true
           cache: true
+
+      - name: Build example provider
+        run: make example-provider
 
       - name: Build
         uses: docker/bake-action@v6

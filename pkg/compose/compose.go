@@ -37,9 +37,8 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/jonboulle/clockwork"
+	"github.com/sirupsen/logrus"
 
-	"github.com/docker/compose/v2/internal/desktop"
-	"github.com/docker/compose/v2/internal/experimental"
 	"github.com/docker/compose/v2/pkg/api"
 )
 
@@ -52,20 +51,42 @@ func init() {
 	}
 }
 
-// NewComposeService create a local implementation of the compose.Service API
-func NewComposeService(dockerCli command.Cli) api.Service {
-	return &composeService{
+type Option func(service *composeService)
+
+// NewComposeService create a local implementation of the compose.Compose API
+func NewComposeService(dockerCli command.Cli, options ...Option) api.Compose {
+	s := &composeService{
 		dockerCli:      dockerCli,
 		clock:          clockwork.NewRealClock(),
 		maxConcurrency: -1,
 		dryRun:         false,
 	}
+	for _, option := range options {
+		option(s)
+	}
+	if s.prompt == nil {
+		s.prompt = func(message string, defaultValue bool) (bool, error) {
+			fmt.Println(message)
+			logrus.Warning("Compose is running without a 'prompt' component to interact with user")
+			return defaultValue, nil
+		}
+	}
+	return s
 }
 
+// WithPrompt configure a UI component for Compose service to interact with user and confirm actions
+func WithPrompt(prompt Prompt) Option {
+	return func(s *composeService) {
+		s.prompt = prompt
+	}
+}
+
+type Prompt func(message string, defaultValue bool) (bool, error)
+
 type composeService struct {
-	dockerCli   command.Cli
-	desktopCli  *desktop.Client
-	experiments *experimental.State
+	dockerCli command.Cli
+	// prompt is used to interact with user and confirm actions
+	prompt Prompt
 
 	clock          clockwork.Clock
 	maxConcurrency int
@@ -79,10 +100,7 @@ type composeService struct {
 func (s *composeService) Close() error {
 	var errs []error
 	if s.dockerCli != nil {
-		errs = append(errs, s.dockerCli.Client().Close())
-	}
-	if s.isDesktopIntegrationActive() {
-		errs = append(errs, s.desktopCli.Close())
+		errs = append(errs, s.apiClient().Close())
 	}
 	return errors.Join(errs...)
 }
@@ -313,15 +331,11 @@ var runtimeVersion runtimeVersionCache
 
 func (s *composeService) RuntimeVersion(ctx context.Context) (string, error) {
 	runtimeVersion.once.Do(func() {
-		version, err := s.dockerCli.Client().ServerVersion(ctx)
+		version, err := s.apiClient().ServerVersion(ctx)
 		if err != nil {
 			runtimeVersion.err = err
 		}
 		runtimeVersion.val = version.APIVersion
 	})
 	return runtimeVersion.val, runtimeVersion.err
-}
-
-func (s *composeService) isDesktopIntegrationActive() bool {
-	return s.desktopCli != nil
 }
