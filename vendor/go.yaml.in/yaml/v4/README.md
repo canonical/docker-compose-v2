@@ -37,6 +37,18 @@ Please [contact us](https://cloud-native.slack.com/archives/C08PPAT8PS7) if you
 would like to contribute or be involved.
 
 
+### Version Intentions
+
+Versions `v1`, `v2`, and `v3` will remain as **frozen legacy**.
+They will receive **security-fixes only** so that existing consumers keep
+working without breaking changes.
+
+All ongoing work, including new features and routine bug-fixes, will happen in
+**`v4`**.
+If you’re starting a new project or upgrading an existing one, please use the
+`go.yaml.in/yaml/v4` import path.
+
+
 ## Compatibility
 
 The `yaml` package supports most of YAML 1.2, but preserves some behavior from
@@ -59,18 +71,18 @@ Specifically, v3 of the `yaml` package:
 
 ## Installation and Usage
 
-The import path for the package is *go.yaml.in/yaml/v3*.
+The import path for the package is *go.yaml.in/yaml/v4*.
 
 To install it, run:
 
 ```bash
-go get go.yaml.in/yaml/v3
+go get go.yaml.in/yaml/v4
 ```
 
 
 ## API Documentation
 
-See: <https://pkg.go.dev/go.yaml.in/yaml/v3>
+See: <https://pkg.go.dev/go.yaml.in/yaml/v4>
 
 
 ## API Stability
@@ -88,7 +100,7 @@ import (
 	"fmt"
 	"log"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 var data = `
@@ -123,7 +135,7 @@ func main() {
 	}
 	fmt.Printf("--- t dump:\n%s\n\n", string(d))
 
-	m := make(map[interface{}]interface{})
+	m := make(map[any]any)
 
 	err = yaml.Unmarshal([]byte(data), &m)
 	if err != nil {
@@ -162,6 +174,50 @@ b:
   d:
   - 3
   - 4
+```
+
+
+## Testing with `make`
+
+Running `make test` in this directory should just work.
+You don't need to have `go` installed and even if you do the `GNUmakefile` will
+ignore it and setup / cache its own version under `.cache/`.
+
+The only things you need are:
+* Linux or macOS
+* `git`
+* `bash`
+* `curl`
+* `make`
+
+Some `make` commands are:
+
+* `make test`
+* `make test GO-VERSION=1.2.34`
+* `make shell` Start a shell with the local `go` environment
+* `make shell GO-VERSION=1.2.34`
+* `make distclean` - Removes `.cache/`
+
+
+## The `go-yaml` CLI Tool
+
+This repository includes a `go-yaml` CLI tool which can be used to understand
+the internal stages and final results of YAML processing with the go-yaml
+library.
+
+```bash
+make go-yaml
+./go-yaml --help
+./go-yaml -t <<< '
+foo: &a1 bar
+*a1: baz
+'
+```
+
+You can also install it with:
+
+```bash
+go install go.yaml.in/yaml/v4/cmd/go-yaml@latest
 ```
 
 
