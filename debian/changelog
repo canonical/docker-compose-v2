@@ -1,3 +1,14 @@
+docker-compose-v2 (2.40.3+ds1-0ubuntu1~22.04.1) jammy; urgency=medium
+
+  * Merge from resolute to jammy (LP: #2127661). Remaining changes:
+    - d/p/toolchain.patch: set go minimum version to 1.24 (adapted from 1.23
+      to 1.24)
+  * Dropped changes:
+    - d/control: build with golang 1.23
+    - d/rules: add golang 1.23 to PATH
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Thu, 12 Feb 2026 15:43:58 -0300
+
 docker-compose-v2 (2.40.3+ds1-0ubuntu1) resolute; urgency=medium
 
   * New upstream version 2.40.3
