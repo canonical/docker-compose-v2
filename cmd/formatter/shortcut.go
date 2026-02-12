@@ -48,8 +48,8 @@ func (ke *KeyboardError) printError(height int, info string) {
 	if ke.shouldDisplay() {
 		errMessage := ke.err.Error()
 
-		MoveCursor(height-1-extraLines(info)-extraLines(errMessage), 0)
-		ClearLine()
+		moveCursor(height-1-extraLines(info)-extraLines(errMessage), 0)
+		clearLine()
 
 		fmt.Print(errMessage)
 	}
@@ -70,10 +70,11 @@ func (ke *KeyboardError) error() string {
 
 type KeyboardWatch struct {
 	Watching bool
-	Watcher  Toggle
+	Watcher  Feature
 }
 
-type Toggle interface {
+// Feature is an compose feature that can be started/stopped by a menu command
+type Feature interface {
 	Start(context.Context) error
 	Stop() error
 }
@@ -88,32 +89,26 @@ const (
 
 type LogKeyboard struct {
 	kError                KeyboardError
-	Watch                 KeyboardWatch
+	Watch                 *KeyboardWatch
 	IsDockerDesktopActive bool
-	IsWatchConfigured     bool
 	logLevel              KEYBOARD_LOG_LEVEL
 	signalChannel         chan<- os.Signal
 }
 
-// FIXME(ndeloof) we should avoid use of such a global reference. see use in logConsumer
-var KeyboardManager *LogKeyboard
-
-func NewKeyboardManager(isDockerDesktopActive bool, sc chan<- os.Signal, w bool, watcher Toggle) *LogKeyboard {
-	KeyboardManager = &LogKeyboard{
-		Watch: KeyboardWatch{
-			Watching: w,
-			Watcher:  watcher,
-		},
+func NewKeyboardManager(isDockerDesktopActive bool, sc chan<- os.Signal) *LogKeyboard {
+	return &LogKeyboard{
 		IsDockerDesktopActive: isDockerDesktopActive,
-		IsWatchConfigured:     true,
 		logLevel:              INFO,
 		signalChannel:         sc,
 	}
-	return KeyboardManager
 }
 
-func (lk *LogKeyboard) ClearKeyboardInfo() {
-	lk.clearNavigationMenu()
+func (lk *LogKeyboard) Decorate(l api.LogConsumer) api.LogConsumer {
+	return logDecorator{
+		decorated: l,
+		Before:    lk.clearNavigationMenu,
+		After:     lk.PrintKeyboardInfo,
+	}
 }
 
 func (lk *LogKeyboard) PrintKeyboardInfo() {
@@ -138,7 +133,7 @@ func (lk *LogKeyboard) createBuffer(lines int) {
 
 	if lines > 0 {
 		allocateSpace(lines)
-		MoveCursorUp(lines)
+		moveCursorUp(lines)
 	}
 }
 
@@ -151,17 +146,17 @@ func (lk *LogKeyboard) printNavigationMenu() {
 		height := goterm.Height()
 		menu := lk.navigationMenu()
 
-		MoveCursorX(0)
-		SaveCursor()
+		carriageReturn()
+		saveCursor()
 
 		lk.kError.printError(height, menu)
 
-		MoveCursor(height-extraLines(menu), 0)
-		ClearLine()
+		moveCursor(height-extraLines(menu), 0)
+		clearLine()
 		fmt.Print(menu)
 
-		MoveCursorX(0)
-		RestoreCursor()
+		carriageReturn()
+		restoreCursor()
 	}
 }
 
@@ -184,7 +179,7 @@ func (lk *LogKeyboard) navigationMenu() string {
 		watchInfo = navColor("   ")
 	}
 	isEnabled := " Enable"
-	if lk.Watch.Watching {
+	if lk.Watch != nil && lk.Watch.Watching {
 		isEnabled = " Disable"
 	}
 	watchInfo = watchInfo + shortcutKeyColor("w") + navColor(isEnabled+" Watch")
@@ -193,15 +188,15 @@ func (lk *LogKeyboard) navigationMenu() string {
 
 func (lk *LogKeyboard) clearNavigationMenu() {
 	height := goterm.Height()
-	MoveCursorX(0)
-	SaveCursor()
+	carriageReturn()
+	saveCursor()
 
-	// ClearLine()
+	// clearLine()
 	for i := 0; i < height; i++ {
-		MoveCursorDown(1)
-		ClearLine()
+		moveCursorDown(1)
+		clearLine()
 	}
-	RestoreCursor()
+	restoreCursor()
 }
 
 func (lk *LogKeyboard) openDockerDesktop(ctx context.Context, project *types.Project) {
@@ -267,7 +262,7 @@ func (lk *LogKeyboard) keyboardError(prefix string, err error) {
 }
 
 func (lk *LogKeyboard) ToggleWatch(ctx context.Context, options api.UpOptions) {
-	if !lk.IsWatchConfigured {
+	if lk.Watch == nil {
 		return
 	}
 	if lk.Watch.Watching {
@@ -298,7 +293,7 @@ func (lk *LogKeyboard) HandleKeyEvents(ctx context.Context, event keyboard.KeyEv
 	case 'v':
 		lk.openDockerDesktop(ctx, project)
 	case 'w':
-		if !lk.IsWatchConfigured {
+		if lk.Watch == nil {
 			// we try to open watch docs if DD is installed
 			if lk.IsDockerDesktopActive {
 				lk.openDDWatchDocs(ctx, project)
@@ -321,22 +316,31 @@ func (lk *LogKeyboard) HandleKeyEvents(ctx context.Context, event keyboard.KeyEv
 	case keyboard.KeyCtrlC:
 		_ = keyboard.Close()
 		lk.clearNavigationMenu()
-		ShowCursor()
+		showCursor()
 
 		lk.logLevel = NONE
 		// will notify main thread to kill and will handle gracefully
 		lk.signalChannel <- syscall.SIGINT
+	case keyboard.KeyCtrlZ:
+		handleCtrlZ()
 	case keyboard.KeyEnter:
-		NewLine()
+		newLine()
 		lk.printNavigationMenu()
+	}
+}
+
+func (lk *LogKeyboard) EnableWatch(enabled bool, watcher Feature) {
+	lk.Watch = &KeyboardWatch{
+		Watching: enabled,
+		Watcher:  watcher,
 	}
 }
 
 func allocateSpace(lines int) {
 	for i := 0; i < lines; i++ {
-		ClearLine()
-		NewLine()
-		MoveCursorX(0)
+		clearLine()
+		newLine()
+		carriageReturn()
 	}
 }
 

@@ -25,7 +25,14 @@ type historyOptions struct {
 }
 
 // NewHistoryCommand creates a new `docker history` command
-func NewHistoryCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewHistoryCommand(dockerCLI command.Cli) *cobra.Command {
+	return newHistoryCommand(dockerCLI)
+}
+
+// newHistoryCommand creates a new `docker history` command
+func newHistoryCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts historyOptions
 
 	cmd := &cobra.Command{
@@ -34,9 +41,9 @@ func NewHistoryCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.image = args[0]
-			return runHistory(cmd.Context(), dockerCli, opts)
+			return runHistory(cmd.Context(), dockerCLI, opts)
 		},
-		ValidArgsFunction: completion.ImageNames(dockerCli, 1),
+		ValidArgsFunction: completion.ImageNames(dockerCLI, 1),
 		Annotations: map[string]string{
 			"aliases": "docker image history, docker history",
 		},
@@ -77,8 +84,8 @@ func runHistory(ctx context.Context, dockerCli command.Cli, opts historyOptions)
 
 	historyCtx := formatter.Context{
 		Output: dockerCli.Out(),
-		Format: NewHistoryFormat(format, opts.quiet, opts.human),
+		Format: newHistoryFormat(format, opts.quiet, opts.human),
 		Trunc:  !opts.noTrunc,
 	}
-	return HistoryWrite(historyCtx, opts.human, history)
+	return historyWrite(historyCtx, opts.human, history)
 }

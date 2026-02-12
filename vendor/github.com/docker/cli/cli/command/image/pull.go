@@ -2,20 +2,16 @@ package image
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/trust"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
-
-// PullOptions defines what and how to pull
-type PullOptions = pullOptions
 
 // pullOptions defines what and how to pull.
 type pullOptions struct {
@@ -27,7 +23,14 @@ type pullOptions struct {
 }
 
 // NewPullCommand creates a new `docker pull` command
-func NewPullCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewPullCommand(dockerCLI command.Cli) *cobra.Command {
+	return newPullCommand(dockerCLI)
+}
+
+// newPullCommand creates a new `docker pull` command
+func newPullCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts pullOptions
 
 	cmd := &cobra.Command{
@@ -36,13 +39,15 @@ func NewPullCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.remote = args[0]
-			return runPull(cmd.Context(), dockerCli, opts)
+			return runPull(cmd.Context(), dockerCLI, opts)
 		},
 		Annotations: map[string]string{
 			"category-top": "5",
 			"aliases":      "docker image pull, docker pull",
 		},
-		ValidArgsFunction: completion.NoComplete,
+		// Complete with local images to help pulling the latest version
+		// of images that are in the image cache.
+		ValidArgsFunction: completion.ImageNames(dockerCLI, 1),
 	}
 
 	flags := cmd.Flags()
@@ -50,17 +55,12 @@ func NewPullCommand(dockerCli command.Cli) *cobra.Command {
 	flags.BoolVarP(&opts.all, "all-tags", "a", false, "Download all tagged images in the repository")
 	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Suppress verbose output")
 
-	command.AddPlatformFlag(flags, &opts.platform)
-	command.AddTrustVerificationFlags(flags, &opts.untrusted, dockerCli.ContentTrustEnabled())
+	addPlatformFlag(flags, &opts.platform)
+	flags.BoolVar(&opts.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image verification")
 
 	_ = cmd.RegisterFlagCompletionFunc("platform", completion.Platforms)
 
 	return cmd
-}
-
-// RunPull performs a pull against the engine based on the specified options
-func RunPull(ctx context.Context, dockerCLI command.Cli, opts PullOptions) error {
-	return runPull(ctx, dockerCLI, opts)
 }
 
 // runPull performs a pull against the engine based on the specified options
@@ -78,7 +78,7 @@ func runPull(ctx context.Context, dockerCLI command.Cli, opts pullOptions) error
 		}
 	}
 
-	imgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, AuthResolver(dockerCLI), distributionRef.String())
+	imgRefAndAuth, err := trust.GetImageReferencesAndAuth(ctx, authResolver(dockerCLI), distributionRef.String())
 	if err != nil {
 		return err
 	}
@@ -86,15 +86,13 @@ func runPull(ctx context.Context, dockerCLI command.Cli, opts pullOptions) error
 	// Check if reference has a digest
 	_, isCanonical := distributionRef.(reference.Canonical)
 	if !opts.untrusted && !isCanonical {
-		err = trustedPull(ctx, dockerCLI, imgRefAndAuth, opts)
-	} else {
-		err = imagePullPrivileged(ctx, dockerCLI, imgRefAndAuth, opts)
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), "when fetching 'plugin'") {
-			return errors.New(err.Error() + " - Use `docker plugin install`")
+		if err := trustedPull(ctx, dockerCLI, imgRefAndAuth, opts); err != nil {
+			return err
 		}
-		return err
+	} else {
+		if err := imagePullPrivileged(ctx, dockerCLI, imgRefAndAuth, opts); err != nil {
+			return err
+		}
 	}
 	_, _ = fmt.Fprintln(dockerCLI.Out(), imgRefAndAuth.Reference().String())
 	return nil

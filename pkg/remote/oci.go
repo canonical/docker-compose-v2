@@ -26,18 +26,44 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/loader"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/distribution/reference"
-	"github.com/docker/buildx/store/storeutil"
-	"github.com/docker/buildx/util/imagetools"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/compose/v2/internal/ocipush"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/docker/compose/v2/internal/oci"
+	spec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
 	OCI_REMOTE_ENABLED = "COMPOSE_EXPERIMENTAL_OCI_REMOTE"
 	OciPrefix          = "oci://"
 )
+
+// validatePathInBase ensures a file path is contained within the base directory,
+// as OCI artifacts resources must all live within the same folder.
+func validatePathInBase(base, unsafePath string) error {
+	// Reject paths with path separators regardless of OS
+	if strings.ContainsAny(unsafePath, "\\/") {
+		return fmt.Errorf("invalid OCI artifact")
+	}
+
+	// Join the base with the untrusted path
+	targetPath := filepath.Join(base, unsafePath)
+
+	// Get the directory of the target path
+	targetDir := filepath.Dir(targetPath)
+
+	// Clean both paths to resolve any .. or . components
+	cleanBase := filepath.Clean(base)
+	cleanTargetDir := filepath.Clean(targetDir)
+
+	// Check if the target directory is the same as base directory
+	if cleanTargetDir != cleanBase {
+		return fmt.Errorf("invalid OCI artifact")
+	}
+
+	return nil
+}
 
 func ociRemoteLoaderEnabled() (bool, error) {
 	if v := os.Getenv(OCI_REMOTE_ENABLED); v != "" {
@@ -68,6 +94,7 @@ func (g ociRemoteLoader) Accept(path string) bool {
 	return strings.HasPrefix(path, OciPrefix)
 }
 
+//nolint:gocyclo
 func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) {
 	enabled, err := ociRemoteLoaderEnabled()
 	if err != nil {
@@ -88,15 +115,11 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 			return "", err
 		}
 
-		opt, err := storeutil.GetImageConfig(g.dockerCli, nil)
-		if err != nil {
-			return "", err
-		}
-		resolver := imagetools.New(opt)
+		resolver := oci.NewResolver(g.dockerCli.ConfigFile())
 
-		content, descriptor, err := resolver.Get(ctx, ref.String())
+		descriptor, content, err := oci.Get(ctx, resolver, ref)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to pull OCI resource %q: %w", ref, err)
 		}
 
 		cache, err := cacheDir()
@@ -106,7 +129,35 @@ func (g ociRemoteLoader) Load(ctx context.Context, path string) (string, error) 
 
 		local = filepath.Join(cache, descriptor.Digest.Hex())
 		if _, err = os.Stat(local); os.IsNotExist(err) {
-			var manifest v1.Manifest
+
+			// a Compose application bundle is published as image index
+			if images.IsIndexType(descriptor.MediaType) {
+				var index spec.Index
+				err = json.Unmarshal(content, &index)
+				if err != nil {
+					return "", err
+				}
+				found := false
+				for _, manifest := range index.Manifests {
+					if manifest.ArtifactType != oci.ComposeProjectArtifactType {
+						continue
+					}
+					found = true
+					digested, err := reference.WithDigest(ref, manifest.Digest)
+					if err != nil {
+						return "", err
+					}
+					descriptor, content, err = oci.Get(ctx, resolver, digested)
+					if err != nil {
+						return "", fmt.Errorf("failed to pull OCI resource %q: %w", ref, err)
+					}
+				}
+				if !found {
+					return "", fmt.Errorf("OCI index %s doesn't refer to compose artifacts", ref)
+				}
+			}
+
+			var manifest spec.Manifest
 			err = json.Unmarshal(content, &manifest)
 			if err != nil {
 				return "", err
@@ -128,19 +179,13 @@ func (g ociRemoteLoader) Dir(path string) string {
 	return g.known[path]
 }
 
-func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, manifest v1.Manifest, ref reference.Named, resolver *imagetools.Resolver) error { //nolint:gocyclo
+func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, manifest spec.Manifest, ref reference.Named, resolver remotes.Resolver) error {
 	err := os.MkdirAll(local, 0o700)
 	if err != nil {
 		return err
 	}
-	composeFile := filepath.Join(local, "compose.yaml")
-	f, err := os.Create(composeFile)
-	if err != nil {
-		return err
-	}
-	defer f.Close() //nolint:errcheck
-	if (manifest.ArtifactType != "" && manifest.ArtifactType != ocipush.ComposeProjectArtifactType) ||
-		(manifest.ArtifactType == "" && manifest.Config.MediaType != ocipush.ComposeEmptyConfigMediaType) {
+	if (manifest.ArtifactType != "" && manifest.ArtifactType != oci.ComposeProjectArtifactType) ||
+		(manifest.ArtifactType == "" && manifest.Config.MediaType != oci.ComposeEmptyConfigMediaType) {
 		return fmt.Errorf("%s is not a compose project OCI artifact, but %s", ref.String(), manifest.ArtifactType)
 	}
 
@@ -149,59 +194,65 @@ func (g ociRemoteLoader) pullComposeFiles(ctx context.Context, local string, man
 		if err != nil {
 			return err
 		}
-		content, _, err := resolver.Get(ctx, digested.String())
+
+		_, content, err := oci.Get(ctx, resolver, digested)
 		if err != nil {
 			return err
 		}
 
 		switch layer.MediaType {
-		case ocipush.ComposeYAMLMediaType:
-			target := f
-			_, extends := layer.Annotations["com.docker.compose.extends"]
-			if extends {
-				target, err = os.Create(filepath.Join(local, layer.Annotations["com.docker.compose.file"]))
-				if err != nil {
-					return err
-				}
-			}
-			if err := writeComposeFile(layer, i, target, content); err != nil {
+		case oci.ComposeYAMLMediaType:
+			if err := writeComposeFile(layer, i, local, content); err != nil {
 				return err
 			}
-		case ocipush.ComposeEnvFileMediaType:
+		case oci.ComposeEnvFileMediaType:
 			if err := writeEnvFile(layer, local, content); err != nil {
 				return err
 			}
-		case ocipush.ComposeEmptyConfigMediaType:
+		case oci.ComposeEmptyConfigMediaType:
 		}
 	}
 	return nil
 }
 
-func writeComposeFile(layer v1.Descriptor, i int, f *os.File, content []byte) error {
+func writeComposeFile(layer spec.Descriptor, i int, local string, content []byte) error {
+	file := "compose.yaml"
+	if _, ok := layer.Annotations["com.docker.compose.extends"]; ok {
+		file = layer.Annotations["com.docker.compose.file"]
+		if err := validatePathInBase(local, file); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(local, file), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
 	if _, ok := layer.Annotations["com.docker.compose.file"]; i > 0 && ok {
 		_, err := f.Write([]byte("\n---\n"))
 		if err != nil {
 			return err
 		}
 	}
-	_, err := f.Write(content)
+	_, err = f.Write(content)
 	return err
 }
 
-func writeEnvFile(layer v1.Descriptor, local string, content []byte) error {
+func writeEnvFile(layer spec.Descriptor, local string, content []byte) error {
 	envfilePath, ok := layer.Annotations["com.docker.compose.envfile"]
 	if !ok {
 		return fmt.Errorf("missing annotation com.docker.compose.envfile in layer %q", layer.Digest)
+	}
+	if err := validatePathInBase(local, envfilePath); err != nil {
+		return err
 	}
 	otherFile, err := os.Create(filepath.Join(local, envfilePath))
 	if err != nil {
 		return err
 	}
+	defer func() { _ = otherFile.Close() }()
 	_, err = otherFile.Write(content)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 var _ loader.ResourceLoader = ociRemoteLoader{}

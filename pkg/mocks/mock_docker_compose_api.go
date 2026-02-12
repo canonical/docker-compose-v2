@@ -5,6 +5,7 @@
 //
 //	mockgen -destination pkg/mocks/mock_docker_compose_api.go -package mocks -source=./pkg/api/api.go Service
 //
+
 // Package mocks is a generated GoMock package.
 package mocks
 
@@ -497,6 +498,21 @@ func (mr *MockServiceMockRecorder) Viz(ctx, project, options any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Viz", reflect.TypeOf((*MockService)(nil).Viz), ctx, project, options)
 }
 
+// Volumes mocks base method.
+func (m *MockService) Volumes(ctx context.Context, project string, options api.VolumesOptions) ([]api.VolumesSummary, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Volumes", ctx, project, options)
+	ret0, _ := ret[0].([]api.VolumesSummary)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Volumes indicates an expected call of Volumes.
+func (mr *MockServiceMockRecorder) Volumes(ctx, project, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Volumes", reflect.TypeOf((*MockService)(nil).Volumes), ctx, project, options)
+}
+
 // Wait mocks base method.
 func (m *MockService) Wait(ctx context.Context, projectName string, options api.WaitOptions) (int64, error) {
 	m.ctrl.T.Helper()
@@ -571,18 +587,6 @@ func (m *MockLogConsumer) Log(containerName, message string) {
 func (mr *MockLogConsumerMockRecorder) Log(containerName, message any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Log", reflect.TypeOf((*MockLogConsumer)(nil).Log), containerName, message)
-}
-
-// Register mocks base method.
-func (m *MockLogConsumer) Register(container string) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Register", container)
-}
-
-// Register indicates an expected call of Register.
-func (mr *MockLogConsumerMockRecorder) Register(container any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Register", reflect.TypeOf((*MockLogConsumer)(nil).Register), container)
 }
 
 // Status mocks base method.

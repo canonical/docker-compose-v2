@@ -196,4 +196,86 @@ func TestLocalComposeRun(t *testing.T) {
 			"front", "env")
 		res.Assert(t, icmd.Expected{Out: "FOO=BAR"})
 	})
+
+	t.Run("compose run -rm with stop signal", func(t *testing.T) {
+		projectName := "run-test"
+		res := c.RunDockerComposeCmd(t, "--project-name", projectName, "-f", "./fixtures/ps-test/compose.yaml", "run", "--rm", "-d", "nginx")
+		res.Assert(t, icmd.Success)
+
+		res = c.RunDockerCmd(t, "ps", "--quiet", "--filter", "name=run-test-nginx")
+		containerID := strings.TrimSpace(res.Stdout())
+
+		res = c.RunDockerCmd(t, "stop", containerID)
+		res.Assert(t, icmd.Success)
+		res = c.RunDockerCmd(t, "ps", "--all", "--filter", "name=run-test-nginx", "--format", "'{{.Names}}'")
+		assert.Assert(t, !strings.Contains(res.Stdout(), "run-test-nginx"), res.Stdout())
+	})
+
+	t.Run("compose run --env", func(t *testing.T) {
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/compose.yaml", "run", "--env", "FOO=BAR",
+			"front", "env")
+		res.Assert(t, icmd.Expected{Out: "FOO=BAR"})
+	})
+
+	t.Run("compose run --build", func(t *testing.T) {
+		c.cleanupWithDown(t, "run-test", "--rmi=local")
+		res := c.RunDockerComposeCmd(t, "-f", "./fixtures/run-test/compose.yaml", "run", "build", "echo", "hello world")
+		res.Assert(t, icmd.Expected{Out: "hello world"})
+	})
+
+	t.Run("compose run with piped input detection", func(t *testing.T) {
+		if composeStandaloneMode {
+			t.Skip("Skipping test compose with piped input detection in standalone mode")
+		}
+		// Test that piped input is properly detected and TTY is automatically disabled
+		// This tests the logic added in run.go that checks dockerCli.In().IsTerminal()
+		cmd := c.NewCmd("sh", "-c", "echo 'piped-content' | docker compose -f ./fixtures/run-test/piped-test.yaml run --rm piped-test")
+		res := icmd.RunCmd(cmd)
+
+		res.Assert(t, icmd.Expected{Out: "piped-content"})
+		res.Assert(t, icmd.Success)
+	})
+
+	t.Run("compose run piped input should not allocate TTY", func(t *testing.T) {
+		if composeStandaloneMode {
+			t.Skip("Skipping test compose with piped input detection in standalone mode")
+		}
+		// Test that when stdin is piped, the container correctly detects no TTY
+		// This verifies that the automatic noTty=true setting works correctly
+		cmd := c.NewCmd("sh", "-c", "echo '' | docker compose -f ./fixtures/run-test/piped-test.yaml run --rm tty-test")
+		res := icmd.RunCmd(cmd)
+
+		res.Assert(t, icmd.Expected{Out: "No TTY detected"})
+		res.Assert(t, icmd.Success)
+	})
+
+	t.Run("compose run piped input with explicit --tty should fail", func(t *testing.T) {
+		if composeStandaloneMode {
+			t.Skip("Skipping test compose with piped input detection in standalone mode")
+		}
+		// Test that explicitly requesting TTY with piped input fails with proper error message
+		// This should trigger the "input device is not a TTY" error
+		cmd := c.NewCmd("sh", "-c", "echo 'test' | docker compose -f ./fixtures/run-test/piped-test.yaml run --rm --tty piped-test")
+		res := icmd.RunCmd(cmd)
+
+		res.Assert(t, icmd.Expected{
+			ExitCode: 1,
+			Err:      "the input device is not a TTY",
+		})
+	})
+
+	t.Run("compose run piped input with --no-TTY=false should fail", func(t *testing.T) {
+		if composeStandaloneMode {
+			t.Skip("Skipping test compose with piped input detection in standalone mode")
+		}
+		// Test that explicitly disabling --no-TTY (i.e., requesting TTY) with piped input fails
+		// This should also trigger the "input device is not a TTY" error
+		cmd := c.NewCmd("sh", "-c", "echo 'test' | docker compose -f ./fixtures/run-test/piped-test.yaml run --rm --no-TTY=false piped-test")
+		res := icmd.RunCmd(cmd)
+
+		res.Assert(t, icmd.Expected{
+			ExitCode: 1,
+			Err:      "the input device is not a TTY",
+		})
+	})
 }

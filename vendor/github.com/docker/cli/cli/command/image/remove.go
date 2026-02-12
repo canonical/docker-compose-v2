@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
@@ -21,7 +21,14 @@ type removeOptions struct {
 }
 
 // NewRemoveCommand creates a new `docker remove` command
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
 func NewRemoveCommand(dockerCLI command.Cli) *cobra.Command {
+	return newRemoveCommand(dockerCLI)
+}
+
+// newRemoveCommand creates a new `docker remove` command
+func newRemoveCommand(dockerCLI command.Cli) *cobra.Command {
 	var options removeOptions
 
 	cmd := &cobra.Command{
@@ -50,8 +57,9 @@ func NewRemoveCommand(dockerCLI command.Cli) *cobra.Command {
 	return cmd
 }
 
-func newRemoveCommand(dockerCli command.Cli) *cobra.Command {
-	cmd := *NewRemoveCommand(dockerCli)
+// newImageRemoveCommand is a sub-command under `image` (`docker image rm`)
+func newImageRemoveCommand(dockerCli command.Cli) *cobra.Command {
+	cmd := *newRemoveCommand(dockerCli)
 	cmd.Aliases = []string{"rmi", "remove"}
 	cmd.Use = "rm [OPTIONS] IMAGE [IMAGE...]"
 	return &cmd
@@ -79,7 +87,7 @@ func runRemove(ctx context.Context, dockerCLI command.Cli, opts removeOptions, i
 	for _, img := range images {
 		dels, err := apiClient.ImageRemove(ctx, img, options)
 		if err != nil {
-			if !cerrdefs.IsNotFound(err) {
+			if !errdefs.IsNotFound(err) {
 				fatalErr = true
 			}
 			errs = append(errs, err)

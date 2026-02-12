@@ -28,6 +28,7 @@ import (
 	"github.com/docker/cli/cli"
 	cmd "github.com/docker/cli/cli/command/container"
 	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v2/pkg/progress"
 	"github.com/docker/docker/pkg/stringid"
 )
 
@@ -58,6 +59,19 @@ func (s *composeService) RunOneOffContainer(ctx context.Context, project *types.
 }
 
 func (s *composeService) prepareRun(ctx context.Context, project *types.Project, opts api.RunOptions) (string, error) {
+	// Temporary implementation of use_api_socket until we get actual support inside docker engine
+	project, err := s.useAPISocket(project)
+	if err != nil {
+		return "", err
+	}
+
+	err = progress.Run(ctx, func(ctx context.Context) error {
+		return s.startDependencies(ctx, project, opts)
+	}, s.stdinfo())
+	if err != nil {
+		return "", err
+	}
+
 	service, err := project.GetService(opts.Service)
 	if err != nil {
 		return "", err
@@ -83,7 +97,9 @@ func (s *composeService) prepareRun(ctx context.Context, project *types.Project,
 		Add(api.SlugLabel, slug).
 		Add(api.OneoffLabel, "True")
 
-	if err := s.ensureImagesExists(ctx, project, opts.Build, opts.QuietPull); err != nil { // all dependencies already checked, but might miss service img
+	// Only ensure image exists for the target service, dependencies were already handled by startDependencies
+	buildOpts := prepareBuildOptions(opts)
+	if err := s.ensureImagesExists(ctx, project, buildOpts, opts.QuietPull); err != nil { // all dependencies already checked, but might miss service img
 		return "", err
 	}
 
@@ -109,11 +125,38 @@ func (s *composeService) prepareRun(ctx context.Context, project *types.Project,
 		return "", err
 	}
 
+	err = s.ensureModels(ctx, project, opts.QuietPull)
+	if err != nil {
+		return "", err
+	}
+
 	created, err := s.createContainer(ctx, project, service, service.ContainerName, -1, createOpts)
 	if err != nil {
 		return "", err
 	}
-	return created.ID, nil
+
+	ctr, err := s.apiClient().ContainerInspect(ctx, created.ID)
+	if err != nil {
+		return "", err
+	}
+
+	err = s.injectSecrets(ctx, project, service, ctr.ID)
+	if err != nil {
+		return created.ID, err
+	}
+
+	err = s.injectConfigs(ctx, project, service, ctr.ID)
+	return created.ID, err
+}
+
+func prepareBuildOptions(opts api.RunOptions) *api.BuildOptions {
+	if opts.Build == nil {
+		return nil
+	}
+	// Create a copy of build options and restrict to only the target service
+	buildOptsCopy := *opts.Build
+	buildOptsCopy.Services = []string{opts.Service}
+	return &buildOptsCopy
 }
 
 func applyRunOptions(project *types.Project, service *types.ServiceConfig, opts api.RunOptions) {
@@ -159,4 +202,25 @@ func applyRunOptions(project *types.Project, service *types.ServiceConfig, opts 
 	for k, v := range opts.Labels {
 		service.Labels = service.Labels.Add(k, v)
 	}
+}
+
+func (s *composeService) startDependencies(ctx context.Context, project *types.Project, options api.RunOptions) error {
+	project = project.WithServicesDisabled(options.Service)
+
+	err := s.Create(ctx, project, api.CreateOptions{
+		Build:         options.Build,
+		IgnoreOrphans: options.IgnoreOrphans,
+		RemoveOrphans: options.RemoveOrphans,
+		QuietPull:     options.QuietPull,
+	})
+	if err != nil {
+		return err
+	}
+
+	if len(project.Services) > 0 {
+		return s.Start(ctx, project.Name, api.StartOptions{
+			Project: project,
+		})
+	}
+	return nil
 }

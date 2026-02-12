@@ -347,19 +347,6 @@ Files: vendor/github.com/beorn7/perks/*
 Copyright: 2013 Blake Mizerany
 License: Expat
 
-Files: vendor/github.com/xeipuuv/*
-Copyright: 2015 xeipuuv <https://github.com/xeipuuv>
-License: Apache-2.0
-
-Files: vendor/github.com/xeipuuv/gojsonschema/schemaLoader.go
-       vendor/github.com/xeipuuv/gojsonschema/draft.go
-Copyright: 2018 johandorland <https://github.com/johandorland>
-License: Apache-2.0
-
-Files: vendor/github.com/xeipuuv/gojsonschema/jsonContext.go
-Copyright: 2013 MongoDB, Inc
-License: Apache-2.0
-
 Files: vendor/github.com/mattn/*
 Copyright: 2016-2017 Yasuhiro Matsumoto <mattn.jp@gmail.com>
 License: Expat
@@ -487,11 +474,6 @@ Files: vendor/github.com/opencontainers/image-spec/*
 Copyright: 2016-2022 The Linux Foundation
 License: Apache-2.0
 
-Files: vendor/dario.cat/mergo/*
-Copyright: 2013-2014 Dario Castañé
-           2009-2012 The Go Authors
-License: BSD-3-clause-Google
-
 Files: vendor/github.com/pmezard/go-difflib/*
 Copyright: 2013 Patrick Mezard
 License: BSD-3-clause-Generic
@@ -503,6 +485,53 @@ License: Apache-2.0
 Files: vendor/github.com/stretchr/testify/*
 Copyright: 2012-2020 Mat Ryer, Tyler Bunnell and contributors
 License: Expat
+
+Files: vendor/github.com/DefangLabs/*
+Copyright: 2025, Jordan Stephens
+License: Apache-2.0
+
+Files: vendor/github.com/DefangLabs/secret-detector/pkg/scanner/is_text_file.go
+Copyright: 2009, The Go Authors
+License: BSD-3-clause-Google
+
+Files: vendor/github.com/acarl005/*
+Copyright: 2018, Andrew Carlson
+License: Expat
+
+Files: vendor/github.com/apparentlymart/*
+Copyright: 2014, Couchbase, Inc
+           2017, Martin Atkins
+           1991-2017, Unicode, Inc
+License: Apache-2.0 or Expat
+
+Files: vendor/github.com/cpuguy83/*
+Copyright: 2014, Brian Goff
+License: Expat
+
+Files: vendor/github.com/distribution/*
+Copyright: 2004-2006, The Linux Foundation and its contributors
+License: Apache-2.0
+
+Files: vendor/github.com/eiannone/*
+Copyright: 2015, Emanuele Iannone
+           2012, termbox-go authors
+License: Expat
+
+Files: vendor/go.opentelemetry.io/otel/*
+Copyright: The OpenTelemetry Authors
+License: Apache-2.0
+
+Files: vendor/github.com/modern-go/*
+Copyright: 2019, Tao Wen
+License: Apache-2.0
+
+Files: vendor/github.com/otiai10/*
+Copyright: 2017-2018, otiai10 (Hiromu OCHIAI)
+License: Expat
+
+Files: vendor/github.com/santhosh-tekuri/*
+Copyright: 2017-2025, Santhosh Kumar Tekuri
+License: Apache-2.0
 
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");
