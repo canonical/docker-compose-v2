@@ -130,7 +130,7 @@ func (d *DryRunClient) ContainerInspect(ctx context.Context, container string) (
 				ID:   id,
 				Name: container,
 				State: &containerType.State{
-					Status: "running", // needed for --wait option
+					Status: containerType.StateRunning, // needed for --wait option
 					Health: &containerType.Health{
 						Status: containerType.Healthy, // needed for healthcheck control
 					},
@@ -218,8 +218,7 @@ func (d *DryRunClient) ImageBuild(ctx context.Context, reader io.Reader, options
 	rc := io.NopCloser(bytes.NewReader(jsonMessage))
 
 	return build.ImageBuildResponse{
-		Body:   rc,
-		OSType: "",
+		Body: rc,
 	}, nil
 }
 

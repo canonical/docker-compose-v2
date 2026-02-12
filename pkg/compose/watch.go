@@ -29,18 +29,21 @@ import (
 	gsync "sync"
 	"time"
 
-	"github.com/compose-spec/compose-go/v2/types"
-	"github.com/compose-spec/compose-go/v2/utils"
-	ccli "github.com/docker/cli/cli/command/container"
 	pathutil "github.com/docker/compose/v2/internal/paths"
 	"github.com/docker/compose/v2/internal/sync"
 	"github.com/docker/compose/v2/internal/tracing"
 	"github.com/docker/compose/v2/pkg/api"
+	"github.com/docker/compose/v2/pkg/progress"
+	cutils "github.com/docker/compose/v2/pkg/utils"
 	"github.com/docker/compose/v2/pkg/watch"
+
+	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/compose-spec/compose-go/v2/utils"
+	ccli "github.com/docker/cli/cli/command/container"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
-	"github.com/mitchellh/mapstructure"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -55,17 +58,16 @@ type Watcher struct {
 	errCh   chan error
 }
 
-func NewWatcher(project *types.Project, options api.UpOptions, w WatchFunc) (*Watcher, error) {
+func NewWatcher(project *types.Project, options api.UpOptions, w WatchFunc, consumer api.LogConsumer) (*Watcher, error) {
 	for i := range project.Services {
 		service := project.Services[i]
 
 		if service.Develop != nil && service.Develop.Watch != nil {
 			build := options.Create.Build
-			build.Quiet = true
 			return &Watcher{
 				project: project,
 				options: api.WatchOptions{
-					LogTo: options.Start.Attach,
+					LogTo: consumer,
 					Build: build,
 				},
 				watchFn: w,
@@ -87,6 +89,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 	w.stopFn = cancelFunc
 	wait, err := w.watchFn(ctx, w.project, w.options)
 	if err != nil {
+		go func() {
+			w.errCh <- err
+		}()
 		return err
 	}
 	go func() {
@@ -192,7 +197,6 @@ func (s *composeService) watch(ctx context.Context, project *types.Project, opti
 		return nil, err
 	}
 	eg, ctx := errgroup.WithContext(ctx)
-	options.LogTo.Register(api.WatchLogger)
 
 	var (
 		rules []watchRule
@@ -231,10 +235,20 @@ func (s *composeService) watch(ctx context.Context, project *types.Project, opti
 				logrus.Warnf("path '%s' also declared by a bind mount volume, this path won't be monitored!\n", trigger.Path)
 				continue
 			} else {
-				var initialSync bool
-				success, err := trigger.Extensions.Get("x-initialSync", &initialSync)
-				if err == nil && success && initialSync && isSync(trigger) {
-					// Need to check initial files are in container that are meant to be synched from watch action
+				shouldInitialSync := trigger.InitialSync
+
+				// Check legacy extension attribute for backward compatibility
+				if !shouldInitialSync {
+					var legacyInitialSync bool
+					success, err := trigger.Extensions.Get("x-initialSync", &legacyInitialSync)
+					if err == nil && success && legacyInitialSync {
+						shouldInitialSync = true
+						logrus.Warnf("x-initialSync is DEPRECATED, please use the official `initial_sync` attribute\n")
+					}
+				}
+
+				if shouldInitialSync && isSync(trigger) {
+					// Need to check initial files are in container that are meant to be synced from watch action
 					err := s.initialSync(ctx, project, service, trigger, syncer)
 					if err != nil {
 						return nil, err
@@ -395,7 +409,7 @@ func loadDevelopmentConfig(service types.ServiceConfig, project *types.Project) 
 			return nil, fmt.Errorf("service %s doesn't have a build section, can't apply %s on watch", types.WatchActionRebuild, service.Name)
 		}
 		if trigger.Action == types.WatchActionSyncExec && len(trigger.Exec.Command) == 0 {
-			return nil, fmt.Errorf("can't watch with action %q on service %s wihtout a command", types.WatchActionSyncExec, service.Name)
+			return nil, fmt.Errorf("can't watch with action %q on service %s without a command", types.WatchActionSyncExec, service.Name)
 		}
 
 		config.Watch[i] = trigger
@@ -599,6 +613,10 @@ func (s *composeService) rebuild(ctx context.Context, project *types.Project, se
 	options.LogTo.Log(api.WatchLogger, fmt.Sprintf("Rebuilding service(s) %q after changes were detected...", services))
 	// restrict the build to ONLY this service, not any of its dependencies
 	options.Build.Services = services
+	options.Build.Progress = progress.ModePlain
+	options.Build.Out = cutils.GetWriter(func(line string) {
+		options.LogTo.Log(api.WatchLogger, line)
+	})
 
 	var (
 		imageNameToIdMap map[string]string
@@ -813,7 +831,7 @@ func (s *composeService) imageCreatedTime(ctx context.Context, project *types.Pr
 	if err != nil {
 		return time.Now(), err
 	}
-	// Need to get oldest one?
+	// Need to get the oldest one?
 	timeCreated, err := time.Parse(time.RFC3339Nano, img.Created)
 	if err != nil {
 		return time.Now(), err

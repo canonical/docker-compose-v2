@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
@@ -23,22 +23,27 @@ type rmOptions struct {
 }
 
 // NewRmCommand creates a new cobra.Command for `docker rm`
-func NewRmCommand(dockerCli command.Cli) *cobra.Command {
+//
+// Deprecated: Do not import commands directly. They will be removed in a future release.
+func NewRmCommand(dockerCLI command.Cli) *cobra.Command {
+	return newRmCommand(dockerCLI)
+}
+
+func newRmCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts rmOptions
 
 	cmd := &cobra.Command{
-		Use:     "rm [OPTIONS] CONTAINER [CONTAINER...]",
-		Aliases: []string{"remove"},
-		Short:   "Remove one or more containers",
-		Args:    cli.RequiresMinArgs(1),
+		Use:   "rm [OPTIONS] CONTAINER [CONTAINER...]",
+		Short: "Remove one or more containers",
+		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.containers = args
-			return runRm(cmd.Context(), dockerCli, &opts)
+			return runRm(cmd.Context(), dockerCLI, &opts)
 		},
 		Annotations: map[string]string{
 			"aliases": "docker container rm, docker container remove, docker rm",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCli, true, func(ctr container.Summary) bool {
+		ValidArgsFunction: completion.ContainerNames(dockerCLI, true, func(ctr container.Summary) bool {
 			return opts.force || ctr.State == container.StateExited || ctr.State == container.StateCreated
 		}),
 	}
@@ -48,6 +53,15 @@ func NewRmCommand(dockerCli command.Cli) *cobra.Command {
 	flags.BoolVarP(&opts.rmLink, "link", "l", false, "Remove the specified link")
 	flags.BoolVarP(&opts.force, "force", "f", false, "Force the removal of a running container (uses SIGKILL)")
 	return cmd
+}
+
+// newRemoveCommand adds subcommands for "docker container"; unlike the
+// top-level "docker rm", it also adds a "remove" alias to support
+// "docker container remove" in addition to "docker container rm".
+func newRemoveCommand(dockerCli command.Cli) *cobra.Command {
+	cmd := *newRmCommand(dockerCli)
+	cmd.Aliases = []string{"rm", "remove"}
+	return &cmd
 }
 
 func runRm(ctx context.Context, dockerCLI command.Cli, opts *rmOptions) error {
@@ -67,7 +81,7 @@ func runRm(ctx context.Context, dockerCLI command.Cli, opts *rmOptions) error {
 	var errs []error
 	for _, name := range opts.containers {
 		if err := <-errChan; err != nil {
-			if opts.force && cerrdefs.IsNotFound(err) {
+			if opts.force && errdefs.IsNotFound(err) {
 				_, _ = fmt.Fprintln(dockerCLI.Err(), err)
 				continue
 			}

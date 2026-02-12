@@ -12,13 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/cli/cli/compose/loader"
 	"github.com/docker/cli/internal/lazyregexp"
+	"github.com/docker/cli/internal/volumespec"
 	"github.com/docker/cli/opts"
 	"github.com/docker/docker/api/types/container"
 	mounttypes "github.com/docker/docker/api/types/mount"
 	networktypes "github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/go-connections/nat"
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
@@ -140,6 +139,16 @@ type containerOptions struct {
 
 	Image string
 	Args  []string
+}
+
+// addPlatformFlag adds "--platform" to a set of flags for API version 1.32 and
+// later, using the value of "DOCKER_DEFAULT_PLATFORM" (if set) as a default.
+//
+// It should not be used for new uses, which may have a different API version
+// requirement.
+func addPlatformFlag(flags *pflag.FlagSet, target *string) {
+	flags.StringVar(target, "platform", os.Getenv("DOCKER_DEFAULT_PLATFORM"), "Set platform if server is multi-platform capable")
+	_ = flags.SetAnnotation("platform", "version", []string{"1.32"})
 }
 
 // addFlags adds all command line flags that will be used by parse to the FlagSet
@@ -365,7 +374,7 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 	volumes := copts.volumes.GetMap()
 	// add any bind targets to the list of container volumes
 	for bind := range copts.volumes.GetMap() {
-		parsed, err := loader.ParseVolume(bind)
+		parsed, err := volumespec.Parse(bind)
 		if err != nil {
 			return nil, err
 		}
@@ -400,17 +409,14 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		tmpfs[k] = v
 	}
 
-	var (
-		runCmd     strslice.StrSlice
-		entrypoint strslice.StrSlice
-	)
+	var runCmd, entrypoint []string
 
 	if len(copts.Args) > 0 {
 		runCmd = copts.Args
 	}
 
 	if copts.entrypoint != "" {
-		entrypoint = strslice.StrSlice{copts.entrypoint}
+		entrypoint = []string{copts.entrypoint}
 	} else if flags.Changed("entrypoint") {
 		// if `--entrypoint=` is parsed then Entrypoint is reset
 		entrypoint = []string{""}
@@ -551,9 +557,9 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		if haveHealthSettings {
 			return nil, errors.Errorf("--no-healthcheck conflicts with --health-* options")
 		}
-		healthConfig = &container.HealthConfig{Test: strslice.StrSlice{"NONE"}}
+		healthConfig = &container.HealthConfig{Test: []string{"NONE"}}
 	} else if haveHealthSettings {
-		var probe strslice.StrSlice
+		var probe []string
 		if copts.healthCmd != "" {
 			probe = []string{"CMD-SHELL", copts.healthCmd}
 		}
@@ -675,8 +681,8 @@ func parse(flags *pflag.FlagSet, copts *containerOptions, serverOS string) (*con
 		UTSMode:        utsMode,
 		UsernsMode:     usernsMode,
 		CgroupnsMode:   cgroupnsMode,
-		CapAdd:         strslice.StrSlice(copts.capAdd.GetSlice()),
-		CapDrop:        strslice.StrSlice(copts.capDrop.GetSlice()),
+		CapAdd:         copts.capAdd.GetSlice(),
+		CapDrop:        copts.capDrop.GetSlice(),
 		GroupAdd:       copts.groupAdd.GetSlice(),
 		RestartPolicy:  restartPolicy,
 		SecurityOpt:    securityOpts,

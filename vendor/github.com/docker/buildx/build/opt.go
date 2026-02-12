@@ -4,19 +4,24 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/containerd/console"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/buildx/builder"
 	"github.com/docker/buildx/driver"
+	"github.com/docker/buildx/util/buildflags"
 	"github.com/docker/buildx/util/confutil"
 	"github.com/docker/buildx/util/dockerutil"
 	"github.com/docker/buildx/util/osutil"
@@ -24,16 +29,31 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/ociindex"
+	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	"github.com/moby/buildkit/frontend/dockerui"
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/identity"
+	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/session/secrets/secretsprovider"
+	"github.com/moby/buildkit/session/sshforward/sshprovider"
 	"github.com/moby/buildkit/session/upload/uploadprovider"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/apicaps"
 	"github.com/moby/buildkit/util/entitlements"
+	"github.com/moby/buildkit/util/gitutil"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/tonistiigi/fsutil"
 )
+
+var sendGitQueryAsInput = sync.OnceValue(func() bool {
+	if v, ok := os.LookupEnv("BUILDX_SEND_GIT_QUERY_AS_INPUT"); ok {
+		if vv, err := strconv.ParseBool(v); err == nil {
+			return vv
+		}
+	}
+	return false
+})
 
 func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *Options, bopts gateway.BuildOpts, cfg *confutil.Config, pw progress.Writer, docker *dockerutil.Client) (_ *client.SolveOpt, release func(), err error) {
 	nodeDriver := node.Driver
@@ -109,6 +129,13 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 		so.FrontendAttrs["cgroup-parent"] = opt.CgroupParent
 	}
 
+	if v, ok := opt.BuildArgs["BUILDKIT_SYNTAX"]; ok {
+		p := strings.SplitN(strings.TrimSpace(v), " ", 2)
+		so.Frontend = "gateway.v0"
+		so.FrontendAttrs["source"] = p[0]
+		so.FrontendAttrs["cmdline"] = v
+	}
+
 	if v, ok := opt.BuildArgs["BUILDKIT_MULTI_PLATFORM"]; ok {
 		if v, _ := strconv.ParseBool(v); v {
 			so.FrontendAttrs["multi-platform"] = "true"
@@ -170,6 +197,20 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 	default:
 		if err := bopts.LLBCaps.Supports(pb.CapMultipleExporters); err != nil {
 			return nil, nil, errors.Errorf("multiple outputs currently unsupported by the current BuildKit daemon, please upgrade to version v0.13+ or use a single output")
+		}
+	}
+
+	// check if index annotations are supported by docker driver
+	if len(opt.Exports) > 0 && opt.CallFunc == nil && len(opt.Annotations) > 0 && nodeDriver.IsMobyDriver() && !nodeDriver.Features(ctx)[driver.MultiPlatform] {
+		for _, exp := range opt.Exports {
+			if exp.Type == "image" || exp.Type == "docker" {
+				for ak := range opt.Annotations {
+					switch ak.Type {
+					case exptypes.AnnotationIndex, exptypes.AnnotationIndexDescriptor:
+						return nil, nil, errors.New("index annotations not supported for single platform export")
+					}
+				}
+			}
 		}
 	}
 
@@ -268,6 +309,13 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 	so.Exports = opt.Exports
 	so.Session = slices.Clone(opt.Session)
 
+	for k, v := range opt.BuildArgs {
+		so.FrontendAttrs["build-arg:"+k] = v
+	}
+	for k, v := range opt.Labels {
+		so.FrontendAttrs["label:"+k] = v
+	}
+
 	releaseLoad, err := loadInputs(ctx, nodeDriver, &opt.Inputs, pw, &so)
 	if err != nil {
 		return nil, nil, err
@@ -293,12 +341,6 @@ func toSolveOpt(ctx context.Context, node builder.Node, multiDriver bool, opt *O
 	}
 	if opt.NoCache {
 		so.FrontendAttrs["no-cache"] = ""
-	}
-	for k, v := range opt.BuildArgs {
-		so.FrontendAttrs["build-arg:"+k] = v
-	}
-	for k, v := range opt.Labels {
-		so.FrontendAttrs["label:"+k] = v
 	}
 
 	for k, v := range node.ProxyConfig {
@@ -375,6 +417,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 		dockerfileName    = inp.DockerfilePath
 		dockerfileSrcName = inp.DockerfilePath
 		toRemove          []string
+		caps              = map[string]struct{}{}
 	)
 
 	switch {
@@ -440,6 +483,16 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 			target.FrontendAttrs["dockerfilekey"] = "dockerfile"
 		}
 		target.FrontendAttrs["context"] = inp.ContextPath
+
+		if err := processGitURL(inp.ContextPath, "context", target, caps); err != nil {
+			return nil, err
+		}
+		if st, ok := target.FrontendInputs["context"]; ok {
+			if dockerfileReader == nil && !filepath.IsAbs(inp.DockerfilePath) {
+				target.FrontendInputs["dockerfile"] = st
+			}
+		}
+
 	default:
 		return nil, errors.Errorf("unable to prepare context: path %q not found", inp.ContextPath)
 	}
@@ -487,7 +540,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 	target.FrontendAttrs["filename"] = dockerfileName
 
 	for k, v := range inp.NamedContexts {
-		target.FrontendAttrs["frontend.caps"] = "moby.buildkit.frontend.contexts+forward"
+		caps["moby.buildkit.frontend.contexts+forward"] = struct{}{}
 		if v.State != nil {
 			target.FrontendAttrs["context:"+k] = "input:" + k
 			if target.FrontendInputs == nil {
@@ -499,6 +552,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 
 		if IsRemoteURL(v.Path) || strings.HasPrefix(v.Path, "docker-image://") || strings.HasPrefix(v.Path, "target:") {
 			target.FrontendAttrs["context:"+k] = v.Path
+			processGitURL(v.Path, "context:"+k, target, caps)
 			continue
 		}
 
@@ -528,6 +582,7 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 			target.FrontendAttrs["context:"+k] = "oci-layout://" + storeName + ":" + tag + "@" + dig
 			continue
 		}
+
 		st, err := os.Stat(v.Path)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to get build context %v", k)
@@ -549,6 +604,12 @@ func loadInputs(ctx context.Context, d *driver.DriverHandle, inp *Inputs, pw pro
 		for _, dir := range toRemove {
 			_ = os.RemoveAll(dir)
 		}
+	}
+
+	if len(caps) > 0 {
+		keys := slices.Collect(maps.Keys(caps))
+		slices.Sort(keys)
+		target.FrontendAttrs["frontend.caps"] = strings.Join(keys, ",")
 	}
 
 	inp.DockerfileMappingSrc = dockerfileSrcName
@@ -622,6 +683,57 @@ func createTempDockerfile(r io.Reader, multiReader *SyncMultiReader) (string, er
 	return dir, err
 }
 
+func processGitURL(url string, name string, target *client.SolveOpt, caps map[string]struct{}) error {
+	gitRef, err := gitutil.ParseURL(url)
+	if err != nil {
+		return err
+	}
+	if len(gitRef.Query) == 0 {
+		return nil
+	}
+	if !sendGitQueryAsInput() {
+		capName := "moby.buildkit.frontend.gitquerystring"
+		if name != "context" {
+			capName += "+forward"
+		}
+		caps[capName] = struct{}{}
+		return nil
+	}
+
+	var keepGitDir *bool
+	if name == "context" {
+		if v, ok := target.FrontendAttrs["build-arg:BUILDKIT_CONTEXT_KEEP_GIT_DIR"]; ok {
+			if vv, err := strconv.ParseBool(v); err == nil {
+				keepGitDir = &vv
+			}
+		}
+	}
+
+	st, ok, err := dockerui.DetectGitContext(url, keepGitDir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
+	if target.FrontendInputs == nil {
+		target.FrontendInputs = make(map[string]llb.State)
+	}
+	if name == "context" {
+		target.FrontendInputs["context"] = *st
+		delete(target.FrontendAttrs, "context")
+		target.FrontendAttrs["input:context"] = url
+	} else {
+		inputName := "git_state_" + name
+		target.FrontendInputs[inputName] = *st
+		target.FrontendAttrs[name] = "input:" + inputName
+		target.FrontendAttrs["input:"+name] = url
+	}
+
+	return nil
+}
+
 // handle https://github.com/moby/moby/pull/10858
 func handleLowercaseDockerfile(dir, p string) string {
 	if filepath.Base(p) != "Dockerfile" {
@@ -659,3 +771,221 @@ type fs struct {
 }
 
 var _ fsutil.FS = &fs{}
+
+func CreateSSH(ssh []*buildflags.SSH) (session.Attachable, error) {
+	configs := make([]sshprovider.AgentConfig, 0, len(ssh))
+	for _, ssh := range ssh {
+		cfg := sshprovider.AgentConfig{
+			ID:    ssh.ID,
+			Paths: slices.Clone(ssh.Paths),
+		}
+		configs = append(configs, cfg)
+	}
+	return sshprovider.NewSSHAgentProvider(configs)
+}
+
+func CreateSecrets(secrets []*buildflags.Secret) (session.Attachable, error) {
+	fs := make([]secretsprovider.Source, 0, len(secrets))
+	for _, secret := range secrets {
+		fs = append(fs, secretsprovider.Source{
+			ID:       secret.ID,
+			FilePath: secret.FilePath,
+			Env:      secret.Env,
+		})
+	}
+	store, err := secretsprovider.NewStore(fs)
+	if err != nil {
+		return nil, err
+	}
+	return secretsprovider.NewSecretProvider(store), nil
+}
+
+func CreateExports(entries []*buildflags.ExportEntry) ([]client.ExportEntry, []string, error) {
+	var outs []client.ExportEntry
+	var localPaths []string
+	if len(entries) == 0 {
+		return nil, nil, nil
+	}
+	var stdoutUsed bool
+	for _, entry := range entries {
+		if entry.Type == "" {
+			return nil, nil, errors.Errorf("type is required for output")
+		}
+
+		out := client.ExportEntry{
+			Type:  entry.Type,
+			Attrs: map[string]string{},
+		}
+		maps.Copy(out.Attrs, entry.Attrs)
+
+		supportFile := false
+		supportDir := false
+		switch out.Type {
+		case client.ExporterLocal:
+			supportDir = true
+		case client.ExporterTar:
+			supportFile = true
+		case client.ExporterOCI, client.ExporterDocker:
+			tar, err := strconv.ParseBool(out.Attrs["tar"])
+			if err != nil {
+				tar = true
+			}
+			supportFile = tar
+			supportDir = !tar
+		case "registry":
+			out.Type = client.ExporterImage
+			out.Attrs["push"] = "true"
+		}
+
+		if supportDir {
+			if entry.Destination == "" {
+				return nil, nil, errors.Errorf("dest is required for %s exporter", out.Type)
+			}
+			if entry.Destination == "-" {
+				return nil, nil, errors.Errorf("dest cannot be stdout for %s exporter", out.Type)
+			}
+
+			fi, err := os.Stat(entry.Destination)
+			if err != nil && !os.IsNotExist(err) {
+				return nil, nil, errors.Wrapf(err, "invalid destination directory: %s", entry.Destination)
+			}
+			if err == nil && !fi.IsDir() {
+				return nil, nil, errors.Errorf("destination directory %s is a file", entry.Destination)
+			}
+			out.OutputDir = entry.Destination
+			localPaths = append(localPaths, entry.Destination)
+		}
+		if supportFile {
+			if entry.Destination == "" && out.Type != client.ExporterDocker {
+				entry.Destination = "-"
+			}
+			if entry.Destination == "-" {
+				if stdoutUsed {
+					return nil, nil, errors.Errorf("multiple outputs configured to write to stdout")
+				}
+				if _, err := console.ConsoleFromFile(os.Stdout); err == nil {
+					return nil, nil, errors.Errorf("dest file is required for %s exporter. refusing to write to console", out.Type)
+				}
+				out.Output = wrapWriteCloser(os.Stdout)
+				stdoutUsed = true
+			} else if entry.Destination != "" {
+				fi, err := os.Stat(entry.Destination)
+				if err != nil && !os.IsNotExist(err) {
+					return nil, nil, errors.Wrapf(err, "invalid destination file: %s", entry.Destination)
+				}
+				if err == nil && fi.IsDir() {
+					return nil, nil, errors.Errorf("destination file %s is a directory", entry.Destination)
+				}
+				f, err := os.Create(entry.Destination)
+				if err != nil {
+					return nil, nil, errors.Errorf("failed to open %s", err)
+				}
+				out.Output = wrapWriteCloser(f)
+				localPaths = append(localPaths, entry.Destination)
+			}
+		}
+
+		outs = append(outs, out)
+	}
+	return outs, localPaths, nil
+}
+
+func wrapWriteCloser(wc io.WriteCloser) func(map[string]string) (io.WriteCloser, error) {
+	return func(map[string]string) (io.WriteCloser, error) {
+		return wc, nil
+	}
+}
+
+func CreateCaches(entries []*buildflags.CacheOptionsEntry) []client.CacheOptionsEntry {
+	var outs []client.CacheOptionsEntry
+	if len(entries) == 0 {
+		return nil
+	}
+
+	for _, entry := range entries {
+		out := client.CacheOptionsEntry{
+			Type:  entry.Type,
+			Attrs: map[string]string{},
+		}
+		maps.Copy(out.Attrs, entry.Attrs)
+		addGithubToken(&out)
+		addAwsCredentials(&out)
+		if !isActive(&out) {
+			continue
+		}
+		outs = append(outs, out)
+	}
+	return outs
+}
+
+func addGithubToken(ci *client.CacheOptionsEntry) {
+	if ci.Type != "gha" {
+		return
+	}
+	version, ok := ci.Attrs["version"]
+	if !ok {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L19
+		if v, ok := os.LookupEnv("ACTIONS_CACHE_SERVICE_V2"); ok {
+			if b, err := strconv.ParseBool(v); err == nil && b {
+				version = "2"
+			}
+		}
+	}
+	if _, ok := ci.Attrs["token"]; !ok {
+		if v, ok := os.LookupEnv("ACTIONS_RUNTIME_TOKEN"); ok {
+			ci.Attrs["token"] = v
+		}
+	}
+	if _, ok := ci.Attrs["url_v2"]; !ok && version == "2" {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L34-L35
+		if v, ok := os.LookupEnv("ACTIONS_RESULTS_URL"); ok {
+			ci.Attrs["url_v2"] = v
+		}
+	}
+	if _, ok := ci.Attrs["url"]; !ok {
+		// https://github.com/actions/toolkit/blob/2b08dc18f261b9fdd978b70279b85cbef81af8bc/packages/cache/src/internal/config.ts#L28-L33
+		if v, ok := os.LookupEnv("ACTIONS_CACHE_URL"); ok {
+			ci.Attrs["url"] = v
+		} else if v, ok := os.LookupEnv("ACTIONS_RESULTS_URL"); ok {
+			ci.Attrs["url"] = v
+		}
+	}
+}
+
+func addAwsCredentials(ci *client.CacheOptionsEntry) {
+	if ci.Type != "s3" {
+		return
+	}
+	_, okAccessKeyID := ci.Attrs["access_key_id"]
+	_, okSecretAccessKey := ci.Attrs["secret_access_key"]
+	// If the user provides access_key_id, secret_access_key, do not override the session token.
+	if okAccessKeyID && okSecretAccessKey {
+		return
+	}
+	ctx := context.TODO()
+	awsConfig, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return
+	}
+	credentials, err := awsConfig.Credentials.Retrieve(ctx)
+	if err != nil {
+		return
+	}
+	if !okAccessKeyID && credentials.AccessKeyID != "" {
+		ci.Attrs["access_key_id"] = credentials.AccessKeyID
+	}
+	if !okSecretAccessKey && credentials.SecretAccessKey != "" {
+		ci.Attrs["secret_access_key"] = credentials.SecretAccessKey
+	}
+	if _, ok := ci.Attrs["session_token"]; !ok && credentials.SessionToken != "" {
+		ci.Attrs["session_token"] = credentials.SessionToken
+	}
+}
+
+func isActive(ce *client.CacheOptionsEntry) bool {
+	// Always active if not gha.
+	if ce.Type != "gha" {
+		return true
+	}
+	return ce.Attrs["token"] != "" && (ce.Attrs["url"] != "" || ce.Attrs["url_v2"] != "")
+}
