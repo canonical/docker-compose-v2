@@ -1,11 +1,14 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.23
+//go:build go1.24
 
 package templates
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"text/template"
 )
@@ -13,20 +16,9 @@ import (
 // basicFunctions are the set of initial
 // functions provided to every template.
 var basicFunctions = template.FuncMap{
-	"json": func(v any) string {
-		buf := &bytes.Buffer{}
-		enc := json.NewEncoder(buf)
-		enc.SetEscapeHTML(false)
-		err := enc.Encode(v)
-		if err != nil {
-			panic(err)
-		}
-
-		// Remove the trailing new line added by the encoder
-		return strings.TrimSpace(buf.String())
-	},
+	"json":     formatJSON,
 	"split":    strings.Split,
-	"join":     strings.Join,
+	"join":     joinElements,
 	"title":    strings.Title, //nolint:nolintlint,staticcheck // strings.Title is deprecated, but we only use it for ASCII, so replacing with golang.org/x/text is out of scope
 	"lower":    strings.ToLower,
 	"upper":    strings.ToUpper,
@@ -80,14 +72,6 @@ func New(tag string) *template.Template {
 	return template.New(tag).Funcs(basicFunctions)
 }
 
-// NewParse creates a new tagged template with the basic functions
-// and parses the given format.
-//
-// Deprecated: this function is unused and will be removed in the next release. Use [New] if you need to set a tag, or [Parse] instead.
-func NewParse(tag, format string) (*template.Template, error) {
-	return template.New(tag).Funcs(basicFunctions).Parse(format)
-}
-
 // padWithSpace adds whitespace to the input if the input is non-empty
 func padWithSpace(source string, prefix, suffix int) string {
 	if source == "" {
@@ -102,4 +86,54 @@ func truncateWithLength(source string, length int) string {
 		return source
 	}
 	return source[:length]
+}
+
+func formatJSON(v any) string {
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(v)
+	if err != nil {
+		panic(err)
+	}
+
+	// Remove the trailing new line added by the encoder
+	return strings.TrimSpace(buf.String())
+}
+
+// joinElements joins a slice of items with the given separator. It uses
+// [strings.Join] if it's a slice of strings, otherwise uses [fmt.Sprint]
+// to join each item to the output.
+func joinElements(elems any, sep string) (string, error) {
+	if elems == nil {
+		return "", nil
+	}
+
+	if ss, ok := elems.([]string); ok {
+		return strings.Join(ss, sep), nil
+	}
+
+	switch rv := reflect.ValueOf(elems); rv.Kind() { //nolint:exhaustive // ignore: too many options to make exhaustive
+	case reflect.Array, reflect.Slice:
+		var b strings.Builder
+		for i := range rv.Len() {
+			if i > 0 {
+				b.WriteString(sep)
+			}
+			_, _ = fmt.Fprint(&b, rv.Index(i).Interface())
+		}
+		return b.String(), nil
+
+	case reflect.Map:
+		var out []string
+		for _, k := range rv.MapKeys() {
+			out = append(out, fmt.Sprint(rv.MapIndex(k).Interface()))
+		}
+		// Not ideal, but trying to keep a consistent order
+		sort.Strings(out)
+		return strings.Join(out, sep), nil
+
+	default:
+		return "", fmt.Errorf("expected slice, got %T", elems)
+	}
 }

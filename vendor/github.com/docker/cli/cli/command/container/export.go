@@ -2,13 +2,15 @@ package container
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/atomicwriter"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -17,13 +19,7 @@ type exportOptions struct {
 	output    string
 }
 
-// NewExportCommand creates a new `docker export` command
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewExportCommand(dockerCLI command.Cli) *cobra.Command {
-	return newExportCommand(dockerCLI)
-}
-
+// newExportCommand creates a new "docker container export" command.
 func newExportCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts exportOptions
 
@@ -38,7 +34,8 @@ func newExportCommand(dockerCLI command.Cli) *cobra.Command {
 		Annotations: map[string]string{
 			"aliases": "docker container export, docker export",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCLI, true),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, true),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -58,13 +55,13 @@ func runExport(ctx context.Context, dockerCLI command.Cli, opts exportOptions) e
 	} else {
 		writer, err := atomicwriter.New(opts.output, 0o600)
 		if err != nil {
-			return errors.Wrap(err, "failed to export container")
+			return fmt.Errorf("failed to export container: %w", err)
 		}
 		defer writer.Close()
 		output = writer
 	}
 
-	responseBody, err := dockerCLI.Client().ContainerExport(ctx, opts.container)
+	responseBody, err := dockerCLI.Client().ContainerExport(ctx, opts.container, client.ContainerExportOptions{})
 	if err != nil {
 		return err
 	}

@@ -2,7 +2,8 @@ package container
 
 import (
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -12,13 +13,6 @@ const (
 	pathHeader       = "PATH"
 )
 
-// NewDiffFormat returns a format for use with a diff Context
-//
-// Deprecated: this function was only used internally and will be removed in the next release.
-func NewDiffFormat(source string) formatter.Format {
-	return newDiffFormat(source)
-}
-
 // newDiffFormat returns a format for use with a diff [formatter.Context].
 func newDiffFormat(source string) formatter.Format {
 	if source == formatter.TableFormatKey {
@@ -27,17 +21,10 @@ func newDiffFormat(source string) formatter.Format {
 	return formatter.Format(source)
 }
 
-// DiffFormatWrite writes formatted diff using the Context
-//
-// Deprecated: this function was only used internally and will be removed in the next release.
-func DiffFormatWrite(fmtCtx formatter.Context, changes []container.FilesystemChange) error {
-	return diffFormatWrite(fmtCtx, changes)
-}
-
 // diffFormatWrite writes formatted diff using the [formatter.Context].
-func diffFormatWrite(fmtCtx formatter.Context, changes []container.FilesystemChange) error {
+func diffFormatWrite(fmtCtx formatter.Context, changes client.ContainerDiffResult) error {
 	return fmtCtx.Write(newDiffContext(), func(format func(subContext formatter.SubContext) error) error {
-		for _, change := range changes {
+		for _, change := range changes.Changes {
 			if err := format(&diffContext{c: change}); err != nil {
 				return err
 			}

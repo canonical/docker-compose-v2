@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.23
+//go:build go1.24
 
 package container
 
@@ -8,7 +8,8 @@ import (
 	"sync"
 
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/capability"
 	"github.com/moby/sys/signal"
 	"github.com/spf13/cobra"
@@ -122,15 +123,15 @@ func addCompletions(cmd *cobra.Command, dockerCLI completion.APIClientProvider) 
 	_ = cmd.RegisterFlagCompletionFunc("cap-add", completeLinuxCapabilityNames)
 	_ = cmd.RegisterFlagCompletionFunc("cap-drop", completeLinuxCapabilityNames)
 	_ = cmd.RegisterFlagCompletionFunc("cgroupns", completeCgroupns())
-	_ = cmd.RegisterFlagCompletionFunc("env", completion.EnvVarNames)
-	_ = cmd.RegisterFlagCompletionFunc("env-file", completion.FileNames)
+	_ = cmd.RegisterFlagCompletionFunc("env", completion.EnvVarNames())
+	_ = cmd.RegisterFlagCompletionFunc("env-file", completion.FileNames())
 	_ = cmd.RegisterFlagCompletionFunc("ipc", completeIpc(dockerCLI))
 	_ = cmd.RegisterFlagCompletionFunc("link", completeLink(dockerCLI))
 	_ = cmd.RegisterFlagCompletionFunc("log-driver", completeLogDriver(dockerCLI))
 	_ = cmd.RegisterFlagCompletionFunc("log-opt", completeLogOpt)
 	_ = cmd.RegisterFlagCompletionFunc("network", completion.NetworkNames(dockerCLI))
 	_ = cmd.RegisterFlagCompletionFunc("pid", completePid(dockerCLI))
-	_ = cmd.RegisterFlagCompletionFunc("platform", completion.Platforms)
+	_ = cmd.RegisterFlagCompletionFunc("platform", completion.Platforms())
 	_ = cmd.RegisterFlagCompletionFunc("pull", completion.FromList(PullImageAlways, PullImageMissing, PullImageNever))
 	_ = cmd.RegisterFlagCompletionFunc("restart", completeRestartPolicies)
 	_ = cmd.RegisterFlagCompletionFunc("security-opt", completeSecurityOpt)
@@ -186,11 +187,11 @@ func completeLink(dockerCLI completion.APIClientProvider) cobra.CompletionFunc {
 // of the build-in log drivers.
 func completeLogDriver(dockerCLI completion.APIClientProvider) cobra.CompletionFunc {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		info, err := dockerCLI.Client().Info(cmd.Context())
+		res, err := dockerCLI.Client().Info(cmd.Context(), client.InfoOptions{})
 		if err != nil {
 			return builtInLogDrivers(), cobra.ShellCompDirectiveNoFileComp
 		}
-		drivers := info.Plugins.Log
+		drivers := res.Info.Plugins.Log
 		return drivers, cobra.ShellCompDirectiveNoFileComp
 	}
 }
@@ -279,12 +280,12 @@ func completeUlimit(_ *cobra.Command, _ []string, _ string) ([]string, cobra.She
 // completeVolumeDriver contacts the API to get the built-in and installed volume drivers.
 func completeVolumeDriver(dockerCLI completion.APIClientProvider) cobra.CompletionFunc {
 	return func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		info, err := dockerCLI.Client().Info(cmd.Context())
+		res, err := dockerCLI.Client().Info(cmd.Context(), client.InfoOptions{})
 		if err != nil {
 			// fallback: the built-in drivers
 			return []string{"local"}, cobra.ShellCompDirectiveNoFileComp
 		}
-		drivers := info.Plugins.Volume
+		drivers := res.Info.Plugins.Volume
 		return drivers, cobra.ShellCompDirectiveNoFileComp
 	}
 }

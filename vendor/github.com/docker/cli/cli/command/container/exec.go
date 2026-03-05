@@ -2,6 +2,7 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -10,9 +11,8 @@ import (
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -39,13 +39,7 @@ func NewExecOptions() ExecOptions {
 	}
 }
 
-// NewExecCommand creates a new cobra.Command for `docker exec`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewExecCommand(dockerCLI command.Cli) *cobra.Command {
-	return newExecCommand(dockerCLI)
-}
-
+// newExecCommand creates a new cobra.Command for "docker exec".
 func newExecCommand(dockerCLI command.Cli) *cobra.Command {
 	options := NewExecOptions()
 
@@ -65,6 +59,7 @@ func newExecCommand(dockerCLI command.Cli) *cobra.Command {
 			"category-top": "2",
 			"aliases":      "docker container exec, docker exec",
 		},
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -77,14 +72,14 @@ func newExecCommand(dockerCLI command.Cli) *cobra.Command {
 	flags.StringVarP(&options.User, "user", "u", "", `Username or UID (format: "<name|uid>[:<group|gid>]")`)
 	flags.BoolVar(&options.Privileged, "privileged", false, "Give extended privileges to the command")
 	flags.VarP(&options.Env, "env", "e", "Set environment variables")
-	flags.SetAnnotation("env", "version", []string{"1.25"})
+	_ = flags.SetAnnotation("env", "version", []string{"1.25"})
 	flags.Var(&options.EnvFile, "env-file", "Read in a file of environment variables")
-	flags.SetAnnotation("env-file", "version", []string{"1.25"})
+	_ = flags.SetAnnotation("env-file", "version", []string{"1.25"})
 	flags.StringVarP(&options.Workdir, "workdir", "w", "", "Working directory inside the container")
-	flags.SetAnnotation("workdir", "version", []string{"1.35"})
+	_ = flags.SetAnnotation("workdir", "version", []string{"1.35"})
 
-	_ = cmd.RegisterFlagCompletionFunc("env", completion.EnvVarNames)
-	_ = cmd.RegisterFlagCompletionFunc("env-file", completion.FileNames)
+	_ = cmd.RegisterFlagCompletionFunc("env", completion.EnvVarNames())
+	_ = cmd.RegisterFlagCompletionFunc("env-file", completion.FileNames())
 
 	return cmd
 }
@@ -102,18 +97,18 @@ func RunExec(ctx context.Context, dockerCLI command.Cli, containerIDorName strin
 	// otherwise if we error out we will leak execIDs on the server (and
 	// there's no easy way to clean those up). But also in order to make "not
 	// exist" errors take precedence we do a dummy inspect first.
-	if _, err := apiClient.ContainerInspect(ctx, containerIDorName); err != nil {
+	if _, err := apiClient.ContainerInspect(ctx, containerIDorName, client.ContainerInspectOptions{}); err != nil {
 		return err
 	}
 	if !options.Detach {
-		if err := dockerCLI.In().CheckTty(execOptions.AttachStdin, execOptions.Tty); err != nil {
+		if err := dockerCLI.In().CheckTty(execOptions.AttachStdin, execOptions.TTY); err != nil {
 			return err
 		}
 	}
 
 	fillConsoleSize(execOptions, dockerCLI)
 
-	response, err := apiClient.ContainerExecCreate(ctx, containerIDorName, *execOptions)
+	response, err := apiClient.ExecCreate(ctx, containerIDorName, *execOptions)
 	if err != nil {
 		return err
 	}
@@ -124,23 +119,24 @@ func RunExec(ctx context.Context, dockerCLI command.Cli, containerIDorName strin
 	}
 
 	if options.Detach {
-		return apiClient.ContainerExecStart(ctx, execID, container.ExecStartOptions{
+		_, err := apiClient.ExecStart(ctx, execID, client.ExecStartOptions{
 			Detach:      options.Detach,
-			Tty:         execOptions.Tty,
-			ConsoleSize: execOptions.ConsoleSize,
+			TTY:         execOptions.TTY,
+			ConsoleSize: client.ConsoleSize{Height: execOptions.ConsoleSize.Height, Width: execOptions.ConsoleSize.Width},
 		})
+		return err
 	}
 	return interactiveExec(ctx, dockerCLI, execOptions, execID)
 }
 
-func fillConsoleSize(execOptions *container.ExecOptions, dockerCli command.Cli) {
-	if execOptions.Tty {
+func fillConsoleSize(execOptions *client.ExecCreateOptions, dockerCli command.Cli) {
+	if execOptions.TTY {
 		height, width := dockerCli.Out().GetTtySize()
-		execOptions.ConsoleSize = &[2]uint{height, width}
+		execOptions.ConsoleSize = client.ConsoleSize{Height: height, Width: width}
 	}
 }
 
-func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *container.ExecOptions, execID string) error {
+func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *client.ExecCreateOptions, execID string) error {
 	// Interactive exec requested.
 	var (
 		out, stderr io.Writer
@@ -154,7 +150,7 @@ func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *co
 		out = dockerCli.Out()
 	}
 	if execOptions.AttachStderr {
-		if execOptions.Tty {
+		if execOptions.TTY {
 			stderr = dockerCli.Out()
 		} else {
 			stderr = dockerCli.Err()
@@ -163,9 +159,9 @@ func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *co
 	fillConsoleSize(execOptions, dockerCli)
 
 	apiClient := dockerCli.Client()
-	resp, err := apiClient.ContainerExecAttach(ctx, execID, container.ExecAttachOptions{
-		Tty:         execOptions.Tty,
-		ConsoleSize: execOptions.ConsoleSize,
+	resp, err := apiClient.ExecAttach(ctx, execID, client.ExecAttachOptions{
+		TTY:         execOptions.TTY,
+		ConsoleSize: client.ConsoleSize{Height: execOptions.ConsoleSize.Height, Width: execOptions.ConsoleSize.Width},
 	})
 	if err != nil {
 		return err
@@ -182,8 +178,8 @@ func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *co
 				inputStream:  in,
 				outputStream: out,
 				errorStream:  stderr,
-				resp:         resp,
-				tty:          execOptions.Tty,
+				resp:         resp.HijackedResponse,
+				tty:          execOptions.TTY,
 				detachKeys:   execOptions.DetachKeys,
 			}
 
@@ -191,7 +187,7 @@ func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *co
 		}()
 	}()
 
-	if execOptions.Tty && dockerCli.In().IsTerminal() {
+	if execOptions.TTY && dockerCli.In().IsTerminal() {
 		if err := MonitorTtySize(ctx, dockerCli, execID, true); err != nil {
 			_, _ = fmt.Fprintln(dockerCli.Err(), "Error monitoring TTY size:", err)
 		}
@@ -205,8 +201,8 @@ func interactiveExec(ctx context.Context, dockerCli command.Cli, execOptions *co
 	return getExecExitStatus(ctx, apiClient, execID)
 }
 
-func getExecExitStatus(ctx context.Context, apiClient client.ContainerAPIClient, execID string) error {
-	resp, err := apiClient.ContainerExecInspect(ctx, execID)
+func getExecExitStatus(ctx context.Context, apiClient client.ExecAPIClient, execID string) error {
+	resp, err := apiClient.ExecInspect(ctx, execID, client.ExecInspectOptions{})
 	if err != nil {
 		// If we can't connect, then the daemon probably died.
 		if !client.IsErrConnectionFailed(err) {
@@ -223,11 +219,11 @@ func getExecExitStatus(ctx context.Context, apiClient client.ContainerAPIClient,
 
 // parseExec parses the specified args for the specified command and generates
 // an ExecConfig from it.
-func parseExec(execOpts ExecOptions, configFile *configfile.ConfigFile) (*container.ExecOptions, error) {
-	execOptions := &container.ExecOptions{
+func parseExec(execOpts ExecOptions, configFile *configfile.ConfigFile) (*client.ExecCreateOptions, error) {
+	execOptions := &client.ExecCreateOptions{
 		User:       execOpts.User,
 		Privileged: execOpts.Privileged,
-		Tty:        execOpts.TTY,
+		TTY:        execOpts.TTY,
 		Cmd:        execOpts.Command,
 		WorkingDir: execOpts.Workdir,
 	}
@@ -251,6 +247,9 @@ func parseExec(execOpts ExecOptions, configFile *configfile.ConfigFile) (*contai
 		execOptions.DetachKeys = execOpts.DetachKeys
 	} else {
 		execOptions.DetachKeys = configFile.DetachKeys
+	}
+	if err := validateDetachKeys(execOpts.DetachKeys); err != nil {
+		return nil, err
 	}
 	return execOptions, nil
 }

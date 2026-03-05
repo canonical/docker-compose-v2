@@ -8,7 +8,8 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -16,14 +17,8 @@ type unpauseOptions struct {
 	containers []string
 }
 
-// NewUnpauseCommand creates a new cobra.Command for `docker unpause`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewUnpauseCommand(dockerCli command.Cli) *cobra.Command {
-	return newUnpauseCommand(dockerCli)
-}
-
-func newUnpauseCommand(dockerCli command.Cli) *cobra.Command {
+// newUnpauseCommand creates a new cobra.Command for "docker container unpause".
+func newUnpauseCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts unpauseOptions
 
 	cmd := &cobra.Command{
@@ -32,21 +27,25 @@ func newUnpauseCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.containers = args
-			return runUnpause(cmd.Context(), dockerCli, &opts)
+			return runUnpause(cmd.Context(), dockerCLI, &opts)
 		},
 		Annotations: map[string]string{
 			"aliases": "docker container unpause, docker unpause",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCli, false, func(ctr container.Summary) bool {
+		ValidArgsFunction: completion.ContainerNames(dockerCLI, false, func(ctr container.Summary) bool {
 			return ctr.State == container.StatePaused
 		}),
+		DisableFlagsInUseLine: true,
 	}
 	return cmd
 }
 
 func runUnpause(ctx context.Context, dockerCLI command.Cli, opts *unpauseOptions) error {
 	apiClient := dockerCLI.Client()
-	errChan := parallelOperation(ctx, opts.containers, apiClient.ContainerUnpause)
+	errChan := parallelOperation(ctx, opts.containers, func(ctx context.Context, container string) error {
+		_, err := apiClient.ContainerUnpause(ctx, container, client.ContainerUnpauseOptions{})
+		return err
+	})
 	var errs []error
 	for _, ctr := range opts.containers {
 		if err := <-errChan; err != nil {

@@ -8,7 +8,8 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -16,13 +17,7 @@ type pauseOptions struct {
 	containers []string
 }
 
-// NewPauseCommand creates a new cobra.Command for `docker pause`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewPauseCommand(dockerCLI command.Cli) *cobra.Command {
-	return newPauseCommand(dockerCLI)
-}
-
+// newPauseCommand creates a new cobra.Command for "docker container pause"
 func newPauseCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts pauseOptions
 
@@ -40,12 +35,16 @@ func newPauseCommand(dockerCLI command.Cli) *cobra.Command {
 		ValidArgsFunction: completion.ContainerNames(dockerCLI, false, func(ctr container.Summary) bool {
 			return ctr.State != container.StatePaused
 		}),
+		DisableFlagsInUseLine: true,
 	}
 }
 
 func runPause(ctx context.Context, dockerCLI command.Cli, opts *pauseOptions) error {
 	apiClient := dockerCLI.Client()
-	errChan := parallelOperation(ctx, opts.containers, apiClient.ContainerPause)
+	errChan := parallelOperation(ctx, opts.containers, func(ctx context.Context, container string) error {
+		_, err := apiClient.ContainerPause(ctx, container, client.ContainerPauseOptions{})
+		return err
+	})
 
 	var errs []error
 	for _, ctr := range opts.containers {
