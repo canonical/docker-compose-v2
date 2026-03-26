@@ -10,15 +10,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/command/formatter"
 	flagsHelper "github.com/docker/cli/cli/flags"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/sirupsen/logrus"
+	"github.com/moby/moby/api/types/events"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -60,16 +60,10 @@ type StatsOptions struct {
 	// filter options may be added in future (within the constraints described
 	// above), but may require daemon-side validation as the list of accepted
 	// filters can differ between daemon- and API versions.
-	Filters *filters.Args
+	Filters client.Filters
 }
 
-// NewStatsCommand creates a new [cobra.Command] for "docker stats".
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewStatsCommand(dockerCLI command.Cli) *cobra.Command {
-	return newStatsCommand(dockerCLI)
-}
-
+// newStatsCommand creates a new [cobra.Command] for "docker container stats".
 func newStatsCommand(dockerCLI command.Cli) *cobra.Command {
 	options := StatsOptions{}
 
@@ -84,7 +78,8 @@ func newStatsCommand(dockerCLI command.Cli) *cobra.Command {
 		Annotations: map[string]string{
 			"aliases": "docker container stats, docker stats",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCLI, false),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, false),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -113,10 +108,17 @@ var acceptedStatsFilters = map[string]bool{
 func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions) error {
 	apiClient := dockerCLI.Client()
 
+	// Get the daemonOSType to handle platform-specific stats fields.
+	// This value is used as a fallback for docker < v29, which did not
+	// include the OSType field per stats.
+	daemonOSType = dockerCLI.ServerInfo().OSType
+
 	// waitFirst is a WaitGroup to wait first stat data's reach for each container
 	waitFirst := &sync.WaitGroup{}
-	// closeChan is a non-buffered channel used to collect errors from goroutines.
-	closeChan := make(chan error)
+	// closeChan is used to collect errors from goroutines. It uses a small buffer
+	// to avoid blocking sends when sends occur after closeChan is set to nil or
+	// after the reader has exited, preventing deadlocks.
+	closeChan := make(chan error, 4)
 	cStats := stats{}
 
 	showAll := len(options.Containers) == 0
@@ -128,35 +130,47 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 		started := make(chan struct{})
 
 		if options.Filters == nil {
-			f := filters.NewArgs()
-			options.Filters = &f
+			options.Filters = make(client.Filters)
 		}
 
-		if err := options.Filters.Validate(acceptedStatsFilters); err != nil {
-			return err
+		// FIXME(thaJeztah): any way we can (and should?) validate allowed filters?
+		for filter := range options.Filters {
+			if _, ok := acceptedStatsFilters[filter]; !ok {
+				return errdefs.ErrInvalidArgument.WithMessage("invalid filter '" + filter + "'")
+			}
 		}
 
 		eh := newEventHandler()
 		if options.All {
 			eh.setHandler(events.ActionCreate, func(e events.Message) {
-				s := NewStats(e.Actor.ID)
-				if cStats.add(s) {
+				if s := NewStats(e.Actor.ID); cStats.add(s) {
 					waitFirst.Add(1)
+					log.G(ctx).WithFields(log.Fields{
+						"event":     e.Action,
+						"container": e.Actor.ID,
+					}).Debug("collecting stats for container")
 					go collect(ctx, s, apiClient, !options.NoStream, waitFirst)
 				}
 			})
 		}
 
 		eh.setHandler(events.ActionStart, func(e events.Message) {
-			s := NewStats(e.Actor.ID)
-			if cStats.add(s) {
+			if s := NewStats(e.Actor.ID); cStats.add(s) {
 				waitFirst.Add(1)
+				log.G(ctx).WithFields(log.Fields{
+					"event":     e.Action,
+					"container": e.Actor.ID,
+				}).Debug("collecting stats for container")
 				go collect(ctx, s, apiClient, !options.NoStream, waitFirst)
 			}
 		})
 
 		if !options.All {
 			eh.setHandler(events.ActionDie, func(e events.Message) {
+				log.G(ctx).WithFields(log.Fields{
+					"event":     e.Action,
+					"container": e.Actor.ID,
+				}).Debug("stop collecting stats for container")
 				cStats.remove(e.Actor.ID)
 			})
 		}
@@ -168,9 +182,8 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 			// the original set of filters. Custom filters are used both
 			// to list containers and to filter events, but the "type" filter
 			// is not valid for filtering containers.
-			f := options.Filters.Clone()
-			f.Add("type", string(events.ContainerEventType))
-			eventChan, errChan := apiClient.Events(ctx, events.ListOptions{
+			f := options.Filters.Clone().Add("type", string(events.ContainerEventType))
+			res := apiClient.Events(ctx, client.EventsListOptions{
 				Filters: f,
 			})
 
@@ -183,10 +196,17 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 				select {
 				case <-stopped:
 					return
-				case event := <-eventChan:
+				case <-ctx.Done():
+					return
+				case event := <-res.Messages:
 					c <- event
-				case err := <-errChan:
-					closeChan <- err
+				case err := <-res.Err:
+					// Prevent blocking if closeChan is full or unread
+					select {
+					case closeChan <- err:
+					default:
+						// drop if not read; avoids deadlock
+					}
 					return
 				}
 			}
@@ -202,17 +222,19 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 		// Fetch the initial list of containers and collect stats for them.
 		// After the initial list was collected, we start listening for events
 		// to refresh the list of containers.
-		cs, err := apiClient.ContainerList(ctx, container.ListOptions{
+		cs, err := apiClient.ContainerList(ctx, client.ContainerListOptions{
 			All:     options.All,
-			Filters: *options.Filters,
+			Filters: options.Filters,
 		})
 		if err != nil {
 			return err
 		}
-		for _, ctr := range cs {
-			s := NewStats(ctr.ID)
-			if cStats.add(s) {
+		for _, ctr := range cs.Items {
+			if s := NewStats(ctr.ID); cStats.add(s) {
 				waitFirst.Add(1)
+				log.G(ctx).WithFields(log.Fields{
+					"container": ctr.ID,
+				}).Debug("collecting stats for container")
 				go collect(ctx, s, apiClient, !options.NoStream, waitFirst)
 			}
 		}
@@ -224,22 +246,25 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 		// only a single code-path is needed, and custom filters can be combined
 		// with a list of container names/IDs.
 
-		if options.Filters != nil && options.Filters.Len() > 0 {
+		if len(options.Filters) > 0 {
 			return errors.New("filtering is not supported when specifying a list of containers")
 		}
 
 		// Create the list of containers, and start collecting stats for all
 		// containers passed.
 		for _, ctr := range options.Containers {
-			s := NewStats(ctr)
-			if cStats.add(s) {
+			if s := NewStats(ctr); cStats.add(s) {
 				waitFirst.Add(1)
+				log.G(ctx).WithFields(log.Fields{
+					"container": ctr,
+				}).Debug("collecting stats for container")
 				go collect(ctx, s, apiClient, !options.NoStream, waitFirst)
 			}
 		}
 
-		// We don't expect any asynchronous errors: closeChan can be closed.
+		// We don't expect any asynchronous errors: closeChan can be closed and disabled.
 		close(closeChan)
+		closeChan = nil
 
 		// make sure each container get at least one valid stat data
 		waitFirst.Wait()
@@ -258,18 +283,12 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 	}
 
 	format := options.Format
-	if len(format) == 0 {
+	if format == "" {
 		if len(dockerCLI.ConfigFile().StatsFormat) > 0 {
 			format = dockerCLI.ConfigFile().StatsFormat
 		} else {
 			format = formatter.TableFormatKey
 		}
-	}
-	if daemonOSType == "" {
-		// Get the daemonOSType if not set already. The daemonOSType variable
-		// should already be set when collecting stats as part of "collect()",
-		// so we unlikely hit this code in practice.
-		daemonOSType = dockerCLI.ServerInfo().OSType
 	}
 
 	// Buffer to store formatted stats text.
@@ -281,63 +300,68 @@ func RunStats(ctx context.Context, dockerCLI command.Cli, options *StatsOptions)
 		Format: NewStatsFormat(format, daemonOSType),
 	}
 
-	var err error
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for range ticker.C {
-		var ccStats []StatsEntry
+	if options.NoStream {
 		cStats.mu.RLock()
+		ccStats := make([]StatsEntry, 0, len(cStats.cs))
 		for _, c := range cStats.cs {
 			ccStats = append(ccStats, c.GetStatistics())
 		}
 		cStats.mu.RUnlock()
 
-		if !options.NoStream {
+		if len(ccStats) == 0 {
+			return nil
+		}
+		if err := statsFormatWrite(statsCtx, ccStats, daemonOSType, !options.NoTrunc); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprint(dockerCLI.Out(), statsTextBuffer.String())
+		return nil
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			cStats.mu.RLock()
+			ccStats := make([]StatsEntry, 0, len(cStats.cs))
+			for _, c := range cStats.cs {
+				ccStats = append(ccStats, c.GetStatistics())
+			}
+			cStats.mu.RUnlock()
+
 			// Start by moving the cursor to the top-left
 			_, _ = fmt.Fprint(&statsTextBuffer, "\033[H")
-		}
 
-		if err = statsFormatWrite(statsCtx, ccStats, daemonOSType, !options.NoTrunc); err != nil {
-			break
-		}
+			if err := statsFormatWrite(statsCtx, ccStats, daemonOSType, !options.NoTrunc); err != nil {
+				return err
+			}
 
-		if !options.NoStream {
 			for _, line := range strings.Split(statsTextBuffer.String(), "\n") {
 				// In case the new text is shorter than the one we are writing over,
 				// we'll append the "erase line" escape sequence to clear the remaining text.
 				_, _ = fmt.Fprintln(&statsTextBuffer, line, "\033[K")
 			}
-
 			// We might have fewer containers than before, so let's clear the remaining text
 			_, _ = fmt.Fprint(&statsTextBuffer, "\033[J")
-		}
 
-		_, _ = fmt.Fprint(dockerCLI.Out(), statsTextBuffer.String())
-		statsTextBuffer.Reset()
+			_, _ = fmt.Fprint(dockerCLI.Out(), statsTextBuffer.String())
+			statsTextBuffer.Reset()
 
-		if len(cStats.cs) == 0 && !showAll {
-			break
-		}
-		if options.NoStream {
-			break
-		}
-		select {
-		case err, ok := <-closeChan:
-			if ok {
-				if err != nil {
-					// Suppress "unexpected EOF" errors in the CLI so that
-					// it shuts down cleanly when the daemon restarts.
-					if errors.Is(err, io.ErrUnexpectedEOF) {
-						return nil
-					}
-					return err
-				}
+			if len(ccStats) == 0 && !showAll {
+				return nil
 			}
-		default:
-			// just skip
+		case err, ok := <-closeChan:
+			if !ok || err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// Suppress "unexpected EOF" errors in the CLI so that
+				// it shuts down cleanly when the daemon restarts.
+				return nil
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
-	return err
 }
 
 // newEventHandler initializes and returns an eventHandler
@@ -364,11 +388,11 @@ func (eh *eventHandler) watch(c <-chan events.Message) {
 			continue
 		}
 		if e.Actor.ID == "" {
-			logrus.WithField("event", e).Errorf("event handler: received %s event with empty ID", e.Action)
+			log.G(context.TODO()).WithField("event", e).Errorf("event handler: received %s event with empty ID", e.Action)
 			continue
 		}
 
-		logrus.WithField("event", e).Debugf("event handler: received %s event for: %s", e.Action, e.Actor.ID)
+		log.G(context.TODO()).WithField("event", e).Debugf("event handler: received %s event for: %s", e.Action, e.Actor.ID)
 		go h(e)
 	}
 }

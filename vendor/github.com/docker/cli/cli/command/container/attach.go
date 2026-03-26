@@ -2,15 +2,15 @@ package container
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/signal"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -23,30 +23,24 @@ type AttachOptions struct {
 }
 
 func inspectContainerAndCheckState(ctx context.Context, apiClient client.APIClient, args string) (*container.InspectResponse, error) {
-	c, err := apiClient.ContainerInspect(ctx, args)
+	c, err := apiClient.ContainerInspect(ctx, args, client.ContainerInspectOptions{})
 	if err != nil {
 		return nil, err
 	}
-	if !c.State.Running {
-		return nil, errors.New("You cannot attach to a stopped container, start it first")
+	if !c.Container.State.Running {
+		return nil, errors.New("cannot attach to a stopped container, start it first")
 	}
-	if c.State.Paused {
-		return nil, errors.New("You cannot attach to a paused container, unpause it first")
+	if c.Container.State.Paused {
+		return nil, errors.New("cannot attach to a paused container, unpause it first")
 	}
-	if c.State.Restarting {
-		return nil, errors.New("You cannot attach to a restarting container, wait until it is running")
+	if c.Container.State.Restarting {
+		return nil, errors.New("cannot attach to a restarting container, wait until it is running")
 	}
 
-	return &c, nil
+	return &c.Container, nil
 }
 
-// NewAttachCommand creates a new cobra.Command for `docker attach`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewAttachCommand(dockerCLI command.Cli) *cobra.Command {
-	return newAttachCommand(dockerCLI)
-}
-
+// newAttachCommand creates a new cobra.Command for `docker attach`
 func newAttachCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts AttachOptions
 
@@ -64,6 +58,7 @@ func newAttachCommand(dockerCLI command.Cli) *cobra.Command {
 		ValidArgsFunction: completion.ContainerNames(dockerCLI, false, func(ctr container.Summary) bool {
 			return ctr.State != container.StatePaused
 		}),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -75,11 +70,19 @@ func newAttachCommand(dockerCLI command.Cli) *cobra.Command {
 
 // RunAttach executes an `attach` command
 func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, opts *AttachOptions) error {
+	detachKeys := opts.DetachKeys
+	if detachKeys == "" {
+		detachKeys = dockerCLI.ConfigFile().DetachKeys
+	}
+	if err := validateDetachKeys(detachKeys); err != nil {
+		return err
+	}
+
 	apiClient := dockerCLI.Client()
 
 	// request channel to wait for client
 	waitCtx := context.WithoutCancel(ctx)
-	resultC, errC := apiClient.ContainerWait(waitCtx, containerID, "")
+	waitRes := apiClient.ContainerWait(waitCtx, containerID, client.ContainerWaitOptions{})
 
 	c, err := inspectContainerAndCheckState(ctx, apiClient, containerID)
 	if err != nil {
@@ -90,12 +93,7 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 		return err
 	}
 
-	detachKeys := dockerCLI.ConfigFile().DetachKeys
-	if opts.DetachKeys != "" {
-		detachKeys = opts.DetachKeys
-	}
-
-	options := container.AttachOptions{
+	options := client.ContainerAttachOptions{
 		Stream:     true,
 		Stdin:      !opts.NoStdin && c.Config.OpenStdin,
 		Stdout:     true,
@@ -119,11 +117,11 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 		defer signal.StopCatch(sigc)
 	}
 
-	resp, errAttach := apiClient.ContainerAttach(ctx, containerID, options)
-	if errAttach != nil {
-		return errAttach
+	res, err := apiClient.ContainerAttach(ctx, containerID, options)
+	if err != nil {
+		return err
 	}
-	defer resp.Close()
+	defer res.HijackedResponse.Close()
 
 	// If use docker attach command to attach to a stop container, it will return
 	// "You cannot attach to a stopped container" error, it's ok, but when
@@ -147,7 +145,7 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 		inputStream:  in,
 		outputStream: dockerCLI.Out(),
 		errorStream:  dockerCLI.Err(),
-		resp:         resp,
+		resp:         res.HijackedResponse,
 		tty:          c.Config.Tty,
 		detachKeys:   options.DetachKeys,
 	}
@@ -157,19 +155,19 @@ func RunAttach(ctx context.Context, dockerCLI command.Cli, containerID string, o
 		return err
 	}
 
-	return getExitStatus(errC, resultC)
+	return getExitStatus(waitRes)
 }
 
-func getExitStatus(errC <-chan error, resultC <-chan container.WaitResponse) error {
+func getExitStatus(waitRes client.ContainerWaitResult) error {
 	select {
-	case result := <-resultC:
+	case result := <-waitRes.Result:
 		if result.Error != nil {
 			return errors.New(result.Error.Message)
 		}
 		if result.StatusCode != 0 {
 			return cli.StatusError{StatusCode: int(result.StatusCode)}
 		}
-	case err := <-errC:
+	case err := <-waitRes.Error:
 		return err
 	}
 
@@ -182,7 +180,7 @@ func resizeTTY(ctx context.Context, dockerCli command.Cli, containerID string) {
 	// terminal, the only way to get the shell prompt to display for attaches 2+ is to artificially
 	// resize it, then go back to normal. Without this, every attach after the first will
 	// require the user to manually resize or hit enter.
-	resizeTtyTo(ctx, dockerCli.Client(), containerID, height+1, width+1, false)
+	resizeTTYTo(ctx, dockerCli.Client(), containerID, height+1, width+1, false)
 
 	// After the above resizing occurs, the call to MonitorTtySize below will handle resetting back
 	// to the actual size.

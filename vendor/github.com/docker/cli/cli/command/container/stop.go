@@ -8,7 +8,7 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -20,13 +20,7 @@ type stopOptions struct {
 	containers []string
 }
 
-// NewStopCommand creates a new cobra.Command for `docker stop`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewStopCommand(dockerCLI command.Cli) *cobra.Command {
-	return newStopCommand(dockerCLI)
-}
-
+// newStopCommand creates a new cobra.Command for "docker container stop".
 func newStopCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts stopOptions
 
@@ -45,7 +39,8 @@ func newStopCommand(dockerCLI command.Cli) *cobra.Command {
 		Annotations: map[string]string{
 			"aliases": "docker container stop, docker stop",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCLI, false),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, false),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -69,10 +64,11 @@ func runStop(ctx context.Context, dockerCLI command.Cli, opts *stopOptions) erro
 
 	apiClient := dockerCLI.Client()
 	errChan := parallelOperation(ctx, opts.containers, func(ctx context.Context, id string) error {
-		return apiClient.ContainerStop(ctx, id, container.StopOptions{
+		_, err := apiClient.ContainerStop(ctx, id, client.ContainerStopOptions{
 			Signal:  opts.signal,
 			Timeout: timeout,
 		})
+		return err
 	})
 	var errs []error
 	for _, ctr := range opts.containers {

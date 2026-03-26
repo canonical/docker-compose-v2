@@ -2,20 +2,21 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"syscall"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/cli/cli/trust"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/signal"
 	"github.com/moby/term"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -28,13 +29,7 @@ type runOptions struct {
 	detachKeys string
 }
 
-// NewRunCommand create a new `docker run` command
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewRunCommand(dockerCLI command.Cli) *cobra.Command {
-	return newRunCommand(dockerCLI)
-}
-
+// newRunCommand create a new "docker run" command.
 func newRunCommand(dockerCLI command.Cli) *cobra.Command {
 	var options runOptions
 	var copts *containerOptions
@@ -55,6 +50,7 @@ func newRunCommand(dockerCLI command.Cli) *cobra.Command {
 			"category-top": "1",
 			"aliases":      "docker container run, docker run",
 		},
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -74,31 +70,28 @@ func newRunCommand(dockerCLI command.Cli) *cobra.Command {
 	flags.Bool("help", false, "Print usage")
 
 	// TODO(thaJeztah): consider adding platform as "image create option" on containerOptions
-	addPlatformFlag(flags, &options.platform)
-	flags.BoolVar(&options.untrusted, "disable-content-trust", !trust.Enabled(), "Skip image verification")
+	flags.StringVar(&options.platform, "platform", os.Getenv("DOCKER_DEFAULT_PLATFORM"), "Set platform if server is multi-platform capable")
+	_ = flags.SetAnnotation("platform", "version", []string{"1.32"})
+
+	// TODO(thaJeztah): DEPRECATED: remove in v29.1 or v30
+	flags.Bool("disable-content-trust", true, "Skip image verification (deprecated)")
+	_ = flags.MarkDeprecated("disable-content-trust", "support for docker content trust was removed")
 	copts = addFlags(flags)
 
 	_ = cmd.RegisterFlagCompletionFunc("detach-keys", completeDetachKeys)
 	addCompletions(cmd, dockerCLI)
 
-	flags.VisitAll(func(flag *pflag.Flag) {
-		// Set a default completion function if none was set. We don't look
-		// up if it does already have one set, because Cobra does this for
-		// us, and returns an error (which we ignore for this reason).
-		_ = cmd.RegisterFlagCompletionFunc(flag.Name, cobra.NoFileCompletions)
-	})
-
 	return cmd
 }
 
-func runRun(ctx context.Context, dockerCli command.Cli, flags *pflag.FlagSet, ropts *runOptions, copts *containerOptions) error {
+func runRun(ctx context.Context, dockerCLI command.Cli, flags *pflag.FlagSet, ropts *runOptions, copts *containerOptions) error {
 	if err := validatePullOpt(ropts.pull); err != nil {
 		return cli.StatusError{
 			Status:     withHelp(err, "run").Error(),
 			StatusCode: 125,
 		}
 	}
-	proxyConfig := dockerCli.ConfigFile().ParseProxyConfig(dockerCli.Client().DaemonHost(), opts.ConvertKVStringsToMapWithNil(copts.env.GetSlice()))
+	proxyConfig := dockerCLI.ConfigFile().ParseProxyConfig(dockerCLI.Client().DaemonHost(), opts.ConvertKVStringsToMapWithNil(copts.env.GetSlice()))
 	newEnv := []string{}
 	for k, v := range proxyConfig {
 		if v == nil {
@@ -108,7 +101,12 @@ func runRun(ctx context.Context, dockerCli command.Cli, flags *pflag.FlagSet, ro
 		}
 	}
 	copts.env = *opts.NewListOptsRef(&newEnv, nil)
-	containerCfg, err := parse(flags, copts, dockerCli.ServerInfo().OSType)
+	serverInfo, err := dockerCLI.Client().Ping(ctx, client.PingOptions{})
+	if err != nil {
+		return err
+	}
+
+	containerCfg, err := parse(flags, copts, serverInfo.OSType)
 	// just in case the parse does not exit
 	if err != nil {
 		return cli.StatusError{
@@ -116,7 +114,7 @@ func runRun(ctx context.Context, dockerCli command.Cli, flags *pflag.FlagSet, ro
 			StatusCode: 125,
 		}
 	}
-	return runContainer(ctx, dockerCli, ropts, copts, containerCfg)
+	return runContainer(ctx, dockerCLI, ropts, copts, containerCfg)
 }
 
 //nolint:gocyclo
@@ -140,6 +138,14 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 		config.AttachStdout = false
 		config.AttachStderr = false
 		config.StdinOnce = false
+	}
+
+	detachKeys := runOpts.detachKeys
+	if detachKeys == "" {
+		detachKeys = dockerCli.ConfigFile().DetachKeys
+	}
+	if err := validateDetachKeys(runOpts.detachKeys); err != nil {
+		return err
 	}
 
 	containerID, err := createContainer(ctx, dockerCli, containerCfg, &runOpts.createOptions)
@@ -174,15 +180,10 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 		}()
 	}
 	if attach {
-		detachKeys := dockerCli.ConfigFile().DetachKeys
-		if runOpts.detachKeys != "" {
-			detachKeys = runOpts.detachKeys
-		}
-
 		// ctx should not be cancellable here, as this would kill the stream to the container
 		// and we want to keep the stream open until the process in the container exits or until
 		// the user forcefully terminates the CLI.
-		closeFn, err := attachContainer(ctx, dockerCli, containerID, &errCh, config, container.AttachOptions{
+		closeFn, err := attachContainer(ctx, dockerCli, containerID, &errCh, config, client.ContainerAttachOptions{
 			Stream:     true,
 			Stdin:      config.AttachStdin,
 			Stdout:     config.AttachStdout,
@@ -202,7 +203,7 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 	statusChan := waitExitOrRemoved(statusCtx, apiClient, containerID, copts.autoRemove)
 
 	// start the container
-	if err := apiClient.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+	if _, err := apiClient.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		// If we have hijackedIOStreamer, we should notify
 		// hijackedIOStreamer we are going to exit and wait
 		// to avoid the terminal are not restored.
@@ -265,7 +266,7 @@ func runContainer(ctx context.Context, dockerCli command.Cli, runOpts *runOption
 	return nil
 }
 
-func attachContainer(ctx context.Context, dockerCli command.Cli, containerID string, errCh *chan error, config *container.Config, options container.AttachOptions) (func(), error) {
+func attachContainer(ctx context.Context, dockerCli command.Cli, containerID string, errCh *chan error, config *container.Config, options client.ContainerAttachOptions) (func(), error) {
 	resp, errAttach := dockerCli.Client().ContainerAttach(ctx, containerID, options)
 	if errAttach != nil {
 		return nil, errAttach
@@ -299,7 +300,7 @@ func attachContainer(ctx context.Context, dockerCli command.Cli, containerID str
 				inputStream:  in,
 				outputStream: out,
 				errorStream:  cerr,
-				resp:         resp,
+				resp:         resp.HijackedResponse,
 				tty:          config.Tty,
 				detachKeys:   options.DetachKeys,
 			}
@@ -310,7 +311,7 @@ func attachContainer(ctx context.Context, dockerCli command.Cli, containerID str
 			return errAttach
 		}()
 	}()
-	return resp.Close, nil
+	return resp.HijackedResponse.Close, nil
 }
 
 // withHelp decorates the error with a suggestion to use "--help".

@@ -3,6 +3,7 @@ package container
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,11 +16,10 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/streams"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/go-units"
 	"github.com/moby/go-archive"
+	"github.com/moby/moby/client"
 	"github.com/morikuni/aec"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -121,13 +121,7 @@ func copyProgress(ctx context.Context, dst io.Writer, header string, total *int6
 	return restore, done
 }
 
-// NewCopyCommand creates a new `docker cp` command
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewCopyCommand(dockerCLI command.Cli) *cobra.Command {
-	return newCopyCommand(dockerCLI)
-}
-
+// newCopyCommand creates a new `docker cp` command
 func newCopyCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts copyOptions
 
@@ -160,6 +154,7 @@ container source to stdout.`,
 		Annotations: map[string]string{
 			"aliases": "docker container cp, docker cp",
 		},
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -235,11 +230,13 @@ func copyFromContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cp
 	// if client requests to follow symbol link, then must decide target file to be copied
 	var rebaseName string
 	if copyConfig.followLink {
-		srcStat, err := apiClient.ContainerStatPath(ctx, copyConfig.container, srcPath)
+		src, err := apiClient.ContainerStatPath(ctx, copyConfig.container, client.ContainerStatPathOptions{
+			Path: srcPath,
+		})
 
 		// If the destination is a symbolic link, we should follow it.
-		if err == nil && srcStat.Mode&os.ModeSymlink != 0 {
-			linkTarget := srcStat.LinkTarget
+		if err == nil && src.Stat.Mode&os.ModeSymlink != 0 {
+			linkTarget := src.Stat.LinkTarget
 			if !isAbs(linkTarget) {
 				// Join with the parent directory.
 				srcParent, _ := archive.SplitPathDirEntry(srcPath)
@@ -254,11 +251,14 @@ func copyFromContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cp
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	content, stat, err := apiClient.CopyFromContainer(ctx, copyConfig.container, srcPath)
+	cpRes, err := apiClient.CopyFromContainer(ctx, copyConfig.container, client.CopyFromContainerOptions{
+		SourcePath: srcPath,
+	})
 	if err != nil {
 		return err
 	}
-	defer content.Close()
+	content := cpRes.Content
+	defer func() { _ = content.Close() }()
 
 	if dstPath == "-" {
 		_, err = io.Copy(dockerCLI.Out(), content)
@@ -268,7 +268,7 @@ func copyFromContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cp
 	srcInfo := archive.CopyInfo{
 		Path:       srcPath,
 		Exists:     true,
-		IsDir:      stat.Mode.IsDir(),
+		IsDir:      cpRes.Stat.Mode.IsDir(),
 		RebaseName: rebaseName,
 	}
 
@@ -304,50 +304,50 @@ func copyFromContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cp
 // about both the source and destination. The API is a simple tar
 // archive/extract API but we can use the stat info header about the
 // destination to be more informed about exactly what the destination is.
-func copyToContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cpConfig) (err error) {
+func copyToContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cpConfig) error {
 	srcPath := copyConfig.sourcePath
 	dstPath := copyConfig.destPath
 
 	if srcPath != "-" {
 		// Get an absolute source path.
-		srcPath, err = resolveLocalPath(srcPath)
+		p, err := resolveLocalPath(srcPath)
 		if err != nil {
 			return err
 		}
+		srcPath = p
 	}
 
 	apiClient := dockerCLI.Client()
 	// Prepare destination copy info by stat-ing the container path.
 	dstInfo := archive.CopyInfo{Path: dstPath}
-	dstStat, err := apiClient.ContainerStatPath(ctx, copyConfig.container, dstPath)
+	if dst, err := apiClient.ContainerStatPath(ctx, copyConfig.container, client.ContainerStatPathOptions{Path: dstPath}); err == nil {
+		// If the destination is a symbolic link, we should evaluate it.
+		if dst.Stat.Mode&os.ModeSymlink != 0 {
+			linkTarget := dst.Stat.LinkTarget
+			if !isAbs(linkTarget) {
+				// Join with the parent directory.
+				dstParent, _ := archive.SplitPathDirEntry(dstPath)
+				linkTarget = filepath.Join(dstParent, linkTarget)
+			}
 
-	// If the destination is a symbolic link, we should evaluate it.
-	if err == nil && dstStat.Mode&os.ModeSymlink != 0 {
-		linkTarget := dstStat.LinkTarget
-		if !isAbs(linkTarget) {
-			// Join with the parent directory.
-			dstParent, _ := archive.SplitPathDirEntry(dstPath)
-			linkTarget = filepath.Join(dstParent, linkTarget)
+			dstInfo.Path = linkTarget
+			dst, err = apiClient.ContainerStatPath(ctx, copyConfig.container, client.ContainerStatPathOptions{Path: linkTarget})
+		}
+		// Validate the destination path
+		if err == nil {
+			if err := command.ValidateOutputPathFileMode(dst.Stat.Mode); err != nil {
+				return fmt.Errorf(`destination "%s:%s" must be a directory or a regular file: %w`, copyConfig.container, dstPath, err)
+			}
+			dstInfo.Exists, dstInfo.IsDir = true, dst.Stat.Mode.IsDir()
 		}
 
-		dstInfo.Path = linkTarget
-		dstStat, err = apiClient.ContainerStatPath(ctx, copyConfig.container, linkTarget)
-		// FIXME(thaJeztah): unhandled error (should this return?)
-	}
-
-	// Validate the destination path
-	if err := command.ValidateOutputPathFileMode(dstStat.Mode); err != nil {
-		return errors.Wrapf(err, `destination "%s:%s" must be a directory or a regular file`, copyConfig.container, dstPath)
-	}
-
-	// Ignore any error and assume that the parent directory of the destination
-	// path exists, in which case the copy may still succeed. If there is any
-	// type of conflict (e.g., non-directory overwriting an existing directory
-	// or vice versa) the extraction will fail. If the destination simply did
-	// not exist, but the parent directory does, the extraction will still
-	// succeed.
-	if err == nil {
-		dstInfo.Exists, dstInfo.IsDir = true, dstStat.Mode.IsDir()
+		// Ignore any error and assume that the parent directory of the destination
+		// path exists, in which case the copy may still succeed. If there is any
+		// type of conflict (e.g., non-directory overwriting an existing directory
+		// or vice versa) the extraction will fail. If the destination simply did
+		// not exist, but the parent directory does, the extraction will still
+		// succeed.
+		_ = err // Intentionally ignore stat errors (see above)
 	}
 
 	var (
@@ -360,7 +360,7 @@ func copyToContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cpCo
 		content = os.Stdin
 		resolvedDstPath = dstInfo.Path
 		if !dstInfo.IsDir {
-			return errors.Errorf("destination \"%s:%s\" must be a directory", copyConfig.container, dstPath)
+			return fmt.Errorf(`destination "%s:%s" must be a directory`, copyConfig.container, dstPath)
 		}
 	} else {
 		// Prepare source copy info.
@@ -403,23 +403,27 @@ func copyToContainer(ctx context.Context, dockerCLI command.Cli, copyConfig cpCo
 		}
 	}
 
-	options := container.CopyToContainerOptions{
-		CopyUIDGID: copyConfig.copyUIDGID,
+	options := client.CopyToContainerOptions{
+		DestinationPath: resolvedDstPath,
+		Content:         content,
+		CopyUIDGID:      copyConfig.copyUIDGID,
 	}
 
 	if copyConfig.quiet {
-		return apiClient.CopyToContainer(ctx, copyConfig.container, resolvedDstPath, content, options)
+		_, err := apiClient.CopyToContainer(ctx, copyConfig.container, options)
+		return err
 	}
 
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	restore, done := copyProgress(ctx, dockerCLI.Err(), copyToContainerHeader, &copiedSize)
-	res := apiClient.CopyToContainer(ctx, copyConfig.container, resolvedDstPath, content, options)
+	// TODO(thaJeztah): error-handling looks odd here; should it be handled differently?
+	_, err := apiClient.CopyToContainer(ctx, copyConfig.container, options)
 	cancel()
 	<-done
 	restore()
-	fmt.Fprintln(dockerCLI.Err(), "Successfully copied", progressHumanSize(copiedSize), "to", copyConfig.container+":"+dstInfo.Path)
+	_, _ = fmt.Fprintln(dockerCLI.Err(), "Successfully copied", progressHumanSize(copiedSize), "to", copyConfig.container+":"+dstInfo.Path)
 
-	return res
+	return err
 }
 
 // We use `:` as a delimiter between CONTAINER and PATH, but `:` could also be

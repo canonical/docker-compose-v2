@@ -2,6 +2,7 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,8 +10,8 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/opts"
-	containertypes "github.com/docker/docker/api/types/container"
-	"github.com/pkg/errors"
+	containertypes "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +27,6 @@ type updateOptions struct {
 	memory             opts.MemBytes
 	memoryReservation  opts.MemBytes
 	memorySwap         opts.MemSwapBytes
-	kernelMemory       opts.MemBytes
 	restartPolicy      string
 	pidsLimit          int64
 	cpus               opts.NanoCPUs
@@ -36,13 +36,7 @@ type updateOptions struct {
 	containers []string
 }
 
-// NewUpdateCommand creates a new cobra.Command for `docker update`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewUpdateCommand(dockerCLI command.Cli) *cobra.Command {
-	return newUpdateCommand(dockerCLI)
-}
-
+// newUpdateCommand creates a new cobra.Command for "docker container update".
 func newUpdateCommand(dockerCLI command.Cli) *cobra.Command {
 	var options updateOptions
 
@@ -58,7 +52,8 @@ func newUpdateCommand(dockerCLI command.Cli) *cobra.Command {
 		Annotations: map[string]string{
 			"aliases": "docker container update, docker update",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCLI, true),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, true),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -66,30 +61,29 @@ func newUpdateCommand(dockerCLI command.Cli) *cobra.Command {
 	flags.Int64Var(&options.cpuPeriod, "cpu-period", 0, "Limit CPU CFS (Completely Fair Scheduler) period")
 	flags.Int64Var(&options.cpuQuota, "cpu-quota", 0, "Limit CPU CFS (Completely Fair Scheduler) quota")
 	flags.Int64Var(&options.cpuRealtimePeriod, "cpu-rt-period", 0, "Limit the CPU real-time period in microseconds")
-	flags.SetAnnotation("cpu-rt-period", "version", []string{"1.25"})
+	_ = flags.SetAnnotation("cpu-rt-period", "version", []string{"1.25"})
 	flags.Int64Var(&options.cpuRealtimeRuntime, "cpu-rt-runtime", 0, "Limit the CPU real-time runtime in microseconds")
-	flags.SetAnnotation("cpu-rt-runtime", "version", []string{"1.25"})
+	_ = flags.SetAnnotation("cpu-rt-runtime", "version", []string{"1.25"})
 	flags.StringVar(&options.cpusetCpus, "cpuset-cpus", "", "CPUs in which to allow execution (0-3, 0,1)")
 	flags.StringVar(&options.cpusetMems, "cpuset-mems", "", "MEMs in which to allow execution (0-3, 0,1)")
 	flags.Int64VarP(&options.cpuShares, "cpu-shares", "c", 0, "CPU shares (relative weight)")
 	flags.VarP(&options.memory, "memory", "m", "Memory limit")
 	flags.Var(&options.memoryReservation, "memory-reservation", "Memory soft limit")
 	flags.Var(&options.memorySwap, "memory-swap", `Swap limit equal to memory plus swap: -1 to enable unlimited swap`)
-	flags.Var(&options.kernelMemory, "kernel-memory", "Kernel memory limit (deprecated)")
-	// --kernel-memory is deprecated on API v1.42 and up, but our current annotations
-	// do not support only showing on < API-version. This option is no longer supported
-	// by runc, so hiding it unconditionally.
-	flags.SetAnnotation("kernel-memory", "deprecated", nil)
-	flags.MarkHidden("kernel-memory")
 
 	flags.StringVar(&options.restartPolicy, "restart", "", "Restart policy to apply when a container exits")
 	flags.Int64Var(&options.pidsLimit, "pids-limit", 0, `Tune container pids limit (set -1 for unlimited)`)
-	flags.SetAnnotation("pids-limit", "version", []string{"1.40"})
+	_ = flags.SetAnnotation("pids-limit", "version", []string{"1.40"})
 
 	flags.Var(&options.cpus, "cpus", "Number of CPUs")
-	flags.SetAnnotation("cpus", "version", []string{"1.29"})
+	_ = flags.SetAnnotation("cpus", "version", []string{"1.29"})
 
 	_ = cmd.RegisterFlagCompletionFunc("restart", completeRestartPolicies)
+
+	// TODO(thaJeztah): remove in next release (v30.0, or v29.x)
+	var stub opts.MemBytes
+	flags.Var(&stub, "kernel-memory", "Kernel memory limit (deprecated)")
+	_ = flags.MarkDeprecated("kernel-memory", "and no longer supported by the kernel")
 
 	return cmd
 }
@@ -109,39 +103,38 @@ func runUpdate(ctx context.Context, dockerCli command.Cli, options *updateOption
 		}
 	}
 
-	resources := containertypes.Resources{
-		BlkioWeight:        options.blkioWeight,
-		CpusetCpus:         options.cpusetCpus,
-		CpusetMems:         options.cpusetMems,
-		CPUShares:          options.cpuShares,
-		Memory:             options.memory.Value(),
-		MemoryReservation:  options.memoryReservation.Value(),
-		MemorySwap:         options.memorySwap.Value(),
-		KernelMemory:       options.kernelMemory.Value(),
-		CPUPeriod:          options.cpuPeriod,
-		CPUQuota:           options.cpuQuota,
-		CPURealtimePeriod:  options.cpuRealtimePeriod,
-		CPURealtimeRuntime: options.cpuRealtimeRuntime,
-		NanoCPUs:           options.cpus.Value(),
-	}
-
+	var pidsLimit *int64
 	if options.pidsLimit != 0 {
-		resources.PidsLimit = &options.pidsLimit
+		pidsLimit = &options.pidsLimit
 	}
 
-	updateConfig := containertypes.UpdateConfig{
-		Resources:     resources,
-		RestartPolicy: restartPolicy,
+	updateConfig := client.ContainerUpdateOptions{
+		Resources: &containertypes.Resources{
+			BlkioWeight:        options.blkioWeight,
+			CpusetCpus:         options.cpusetCpus,
+			CpusetMems:         options.cpusetMems,
+			CPUShares:          options.cpuShares,
+			Memory:             options.memory.Value(),
+			MemoryReservation:  options.memoryReservation.Value(),
+			MemorySwap:         options.memorySwap.Value(),
+			CPUPeriod:          options.cpuPeriod,
+			CPUQuota:           options.cpuQuota,
+			CPURealtimePeriod:  options.cpuRealtimePeriod,
+			CPURealtimeRuntime: options.cpuRealtimeRuntime,
+			NanoCPUs:           options.cpus.Value(),
+			PidsLimit:          pidsLimit,
+		},
+		RestartPolicy: &restartPolicy,
 	}
 
 	var (
 		warns []string
-		errs  []string
+		errs  []error
 	)
 	for _, ctr := range options.containers {
 		r, err := dockerCli.Client().ContainerUpdate(ctx, ctr, updateConfig)
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 		} else {
 			_, _ = fmt.Fprintln(dockerCli.Out(), ctr)
 		}
@@ -150,8 +143,5 @@ func runUpdate(ctx context.Context, dockerCli command.Cli, options *updateOption
 	if len(warns) > 0 {
 		_, _ = fmt.Fprintln(dockerCli.Out(), strings.Join(warns, "\n"))
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "\n"))
-	}
-	return nil
+	return errors.Join(errs...)
 }

@@ -31,6 +31,7 @@ type NamedContext struct {
 	bc               *Client
 	name             string
 	nameWithPlatform string
+	sharedKey        string
 	opt              ContextOpt
 }
 
@@ -41,12 +42,14 @@ func (bc *Client) namedContext(name string, nameWithPlatform string, opt Context
 	if !ok {
 		return nil, nil
 	}
+	sharedKey := opts["sharedkey:localdir:"+nameWithPlatform]
 
 	return &NamedContext{
 		input:            v,
 		bc:               bc,
 		name:             name,
 		nameWithPlatform: nameWithPlatform,
+		sharedKey:        sharedKey,
 		opt:              opt,
 	}, nil
 }
@@ -94,9 +97,9 @@ func (nc *NamedContext) load(ctx context.Context, count int) (*llb.State, *docke
 		named = reference.TagNameOnly(named)
 
 		ref, dgst, data, err := nc.bc.client.ResolveImageConfig(ctx, named.String(), sourceresolver.Opt{
-			LogName:  fmt.Sprintf("[context %s] load metadata for %s", nc.nameWithPlatform, ref),
-			Platform: opt.Platform,
+			LogName: fmt.Sprintf("[context %s] load metadata for %s", nc.nameWithPlatform, ref),
 			ImageOpt: &sourceresolver.ResolveImageOpt{
+				Platform:    opt.Platform,
 				ResolveMode: opt.ResolveMode,
 			},
 		})
@@ -183,9 +186,9 @@ func (nc *NamedContext) load(ctx context.Context, count int) (*llb.State, *docke
 		}
 
 		_, dgst, data, err := nc.bc.client.ResolveImageConfig(ctx, dummyRef.String(), sourceresolver.Opt{
-			LogName:  fmt.Sprintf("[context %s] load metadata for %s", nc.nameWithPlatform, dummyRef.String()),
-			Platform: opt.Platform,
+			LogName: fmt.Sprintf("[context %s] load metadata for %s", nc.nameWithPlatform, dummyRef.String()),
 			OCILayoutOpt: &sourceresolver.ResolveOCILayoutOpt{
+				Platform: opt.Platform,
 				Store: sourceresolver.ResolveImageConfigOptStore{
 					SessionID: nc.bc.bopts.SessionID,
 					StoreID:   named.Name(),
@@ -265,6 +268,7 @@ func (nc *NamedContext) load(ctx context.Context, count int) (*llb.State, *docke
 			name:             vv[1],
 			nameWithPlatform: nc.nameWithPlatform,
 			sessionID:        sessionID,
+			sharedKey:        nc.sharedKey,
 			excludes:         excludes,
 			extraOpts:        opt.AsyncLocalOpts,
 		}
@@ -310,6 +314,7 @@ type asyncLocalOutput struct {
 	name             string
 	nameWithPlatform string
 	sessionID        string
+	sharedKey        string
 	excludes         []string
 	extraOpts        func() []llb.LocalOption
 	once             sync.Once
@@ -330,10 +335,11 @@ func (a *asyncLocalOutput) do() {
 	if a.extraOpts != nil {
 		extraOpts = a.extraOpts()
 	}
+	sharedKey := "context:" + a.nameWithPlatform + "-" + a.sharedKey
 	opts := append([]llb.LocalOption{
 		llb.WithCustomName("[context " + a.nameWithPlatform + "] load from client"),
 		llb.SessionID(a.sessionID),
-		llb.SharedKeyHint("context:" + a.nameWithPlatform),
+		llb.SharedKeyHint(sharedKey),
 		llb.ExcludePatterns(a.excludes),
 	}, extraOpts...)
 

@@ -20,16 +20,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	// ReexecEnvvar is the name of an ennvar which is set to the command
-	// used to originally invoke the docker CLI when executing a
-	// plugin. Assuming $PATH and $CWD remain unchanged this should allow
-	// the plugin to re-execute the original CLI.
-	//
-	// Deprecated: use [metadata.ReexecEnvvar]. This alias will be removed in the next release.
-	ReexecEnvvar = metadata.ReexecEnvvar
-)
-
 // errPluginNotFound is the error returned when a plugin could not be found.
 type errPluginNotFound string
 
@@ -37,13 +27,6 @@ func (errPluginNotFound) NotFound() {}
 
 func (e errPluginNotFound) Error() string {
 	return "Error: No such CLI plugin: " + string(e)
-}
-
-// IsNotFound is true if the given error is due to a plugin not being found.
-//
-// Deprecated: use [errdefs.IsNotFound].
-func IsNotFound(err error) bool {
-	return errdefs.IsNotFound(err)
 }
 
 // getPluginDirs returns the platform-specific locations to search for plugins
@@ -196,7 +179,7 @@ func PluginRunCommand(dockerCli config.Provider, name string, rootcmd *cobra.Com
 	// have been provided by cobra to our caller. This is because
 	// they lack e.g. global options which we must propagate here.
 	args := os.Args[1:]
-	if !pluginNameRe.MatchString(name) {
+	if !isValidPluginName(name) {
 		// We treat this as "not found" so that callers will
 		// fallback to their "invalid" command path.
 		return nil, errPluginNotFound(name)

@@ -7,8 +7,8 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -23,13 +23,7 @@ type logsOptions struct {
 	container string
 }
 
-// NewLogsCommand creates a new cobra.Command for `docker logs`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewLogsCommand(dockerCLI command.Cli) *cobra.Command {
-	return newLogsCommand(dockerCLI)
-}
-
+// newLogsCommand creates a new cobra.Command for "docker container logs"
 func newLogsCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts logsOptions
 
@@ -44,7 +38,8 @@ func newLogsCommand(dockerCLI command.Cli) *cobra.Command {
 		Annotations: map[string]string{
 			"aliases": "docker container logs, docker logs",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCLI, true),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, true),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -59,12 +54,12 @@ func newLogsCommand(dockerCLI command.Cli) *cobra.Command {
 }
 
 func runLogs(ctx context.Context, dockerCli command.Cli, opts *logsOptions) error {
-	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container)
+	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container, client.ContainerInspectOptions{})
 	if err != nil {
 		return err
 	}
 
-	responseBody, err := dockerCli.Client().ContainerLogs(ctx, c.ID, container.LogsOptions{
+	resp, err := dockerCli.Client().ContainerLogs(ctx, c.Container.ID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Since:      opts.since,
@@ -77,12 +72,12 @@ func runLogs(ctx context.Context, dockerCli command.Cli, opts *logsOptions) erro
 	if err != nil {
 		return err
 	}
-	defer responseBody.Close()
+	defer func() { _ = resp.Close() }()
 
-	if c.Config.Tty {
-		_, err = io.Copy(dockerCli.Out(), responseBody)
+	if c.Container.Config.Tty {
+		_, err = io.Copy(dockerCli.Out(), resp)
 	} else {
-		_, err = stdcopy.StdCopy(dockerCli.Out(), dockerCli.Err(), responseBody)
+		_, err = stdcopy.StdCopy(dockerCli.Out(), dockerCli.Err(), resp)
 	}
 	return err
 }

@@ -5,7 +5,7 @@ import (
 	"os"
 	gosignal "os/signal"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/signal"
 	"github.com/sirupsen/logrus"
 )
@@ -48,7 +48,10 @@ func ForwardAllSignals(ctx context.Context, apiClient client.ContainerAPIClient,
 			continue
 		}
 
-		if err := apiClient.ContainerKill(ctx, cid, sig); err != nil {
+		_, err := apiClient.ContainerKill(ctx, cid, client.ContainerKillOptions{
+			Signal: sig,
+		})
+		if err != nil {
 			logrus.Debugf("Error sending signal: %s", err)
 		}
 	}

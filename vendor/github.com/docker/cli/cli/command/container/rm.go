@@ -10,7 +10,8 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -22,13 +23,7 @@ type rmOptions struct {
 	containers []string
 }
 
-// NewRmCommand creates a new cobra.Command for `docker rm`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewRmCommand(dockerCLI command.Cli) *cobra.Command {
-	return newRmCommand(dockerCLI)
-}
-
+// newRmCommand creates a new cobra.Command for "docker container rm".
 func newRmCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts rmOptions
 
@@ -46,6 +41,7 @@ func newRmCommand(dockerCLI command.Cli) *cobra.Command {
 		ValidArgsFunction: completion.ContainerNames(dockerCLI, true, func(ctr container.Summary) bool {
 			return opts.force || ctr.State == container.StateExited || ctr.State == container.StateCreated
 		}),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -71,11 +67,12 @@ func runRm(ctx context.Context, dockerCLI command.Cli, opts *rmOptions) error {
 		if ctrID == "" {
 			return errors.New("container name cannot be empty")
 		}
-		return apiClient.ContainerRemove(ctx, ctrID, container.RemoveOptions{
+		_, err := apiClient.ContainerRemove(ctx, ctrID, client.ContainerRemoveOptions{
 			RemoveVolumes: opts.rmVolumes,
 			RemoveLinks:   opts.rmLink,
 			Force:         opts.force,
 		})
+		return err
 	})
 
 	var errs []error

@@ -5,15 +5,14 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/completion"
-	"github.com/docker/go-connections/nat"
 	"github.com/fvbommel/sortorder"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -23,14 +22,8 @@ type portOptions struct {
 	port string
 }
 
-// NewPortCommand creates a new cobra.Command for `docker port`
-//
-// Deprecated: Do not import commands directly. They will be removed in a future release.
-func NewPortCommand(dockerCli command.Cli) *cobra.Command {
-	return newPortCommand(dockerCli)
-}
-
-func newPortCommand(dockerCli command.Cli) *cobra.Command {
+// newPortCommand creates a new cobra.Command for "docker container port".
+func newPortCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts portOptions
 
 	cmd := &cobra.Command{
@@ -42,12 +35,13 @@ func newPortCommand(dockerCli command.Cli) *cobra.Command {
 			if len(args) > 1 {
 				opts.port = args[1]
 			}
-			return runPort(cmd.Context(), dockerCli, &opts)
+			return runPort(cmd.Context(), dockerCLI, &opts)
 		},
 		Annotations: map[string]string{
 			"aliases": "docker container port, docker port",
 		},
-		ValidArgsFunction: completion.ContainerNames(dockerCli, false),
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, false),
+		DisableFlagsInUseLine: true,
 	}
 	return cmd
 }
@@ -59,31 +53,28 @@ func newPortCommand(dockerCli command.Cli) *cobra.Command {
 // proto is specified. We should consider changing this to "any" protocol
 // for the given private port.
 func runPort(ctx context.Context, dockerCli command.Cli, opts *portOptions) error {
-	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container)
+	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container, client.ContainerInspectOptions{})
 	if err != nil {
 		return err
 	}
 
 	var out []string
 	if opts.port != "" {
-		port, proto, _ := strings.Cut(opts.port, "/")
-		if proto == "" {
-			proto = "tcp"
+		port, err := network.ParsePort(opts.port)
+		if err != nil {
+			return err
 		}
-		if _, err = strconv.ParseUint(port, 10, 16); err != nil {
-			return errors.Wrapf(err, "Error: invalid port (%s)", port)
-		}
-		frontends, exists := c.NetworkSettings.Ports[nat.Port(port+"/"+proto)]
+		frontends, exists := c.Container.NetworkSettings.Ports[port]
 		if !exists || len(frontends) == 0 {
-			return errors.Errorf("Error: No public port '%s' published for %s", opts.port, opts.container)
+			return fmt.Errorf("no public port '%s' published for %s", opts.port, opts.container)
 		}
 		for _, frontend := range frontends {
-			out = append(out, net.JoinHostPort(frontend.HostIP, frontend.HostPort))
+			out = append(out, net.JoinHostPort(frontend.HostIP.String(), frontend.HostPort))
 		}
 	} else {
-		for from, frontends := range c.NetworkSettings.Ports {
+		for from, frontends := range c.Container.NetworkSettings.Ports {
 			for _, frontend := range frontends {
-				out = append(out, fmt.Sprintf("%s -> %s", from, net.JoinHostPort(frontend.HostIP, frontend.HostPort)))
+				out = append(out, fmt.Sprintf("%s -> %s", from, net.JoinHostPort(frontend.HostIP.String(), frontend.HostPort)))
 			}
 		}
 	}
