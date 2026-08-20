@@ -318,12 +318,6 @@ Files: vendor/github.com/miekg/pkcs11/*
 Copyright: 2013 Miek Gieben
 License: BSD-3-clause-Generic
 
-Files: vendor/github.com/miekg/pkcs11/pkcs11.h
-       vendor/github.com/miekg/pkcs11/pkcs11t.h
-       vendor/github.com/miekg/pkcs11/pkcs11f.h
-Copyright: 2016 OASIS Open
-License: OASIS-IPR-Policy
-
 Files: vendor/github.com/prometheus/*
 Copyright: 2013-2022 The Prometheus Authors
 License: Apache-2.0
@@ -1035,9 +1029,3 @@ License: ISC
  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-
-License: OASIS-IPR-Policy
- Distributed under the terms of the OASIS IPR Policy,
- [http://www.oasis-open.org/policies-guidelines/ipr], AS-IS, WITHOUT ANY
- IMPLIED OR EXPRESS WARRANTY; there is no warranty of MERCHANTABILITY, FITNESS
- FOR A PARTICULAR PURPOSE or NONINFRINGEMENT of the rights of others.
