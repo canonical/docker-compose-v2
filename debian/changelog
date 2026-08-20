@@ -1,3 +1,13 @@
+docker-compose-v2 (2.40.3+ds2-0ubuntu1) stonking; urgency=medium
+
+  * d/p/unembed-nss.patch: use libnss to avoid vendored non-free headers
+  * d/control: B-D on libnss3-dev
+  * d/repack-compose-with-vendor.sh: do not ship non-free headers
+  * d/copyright: update copyright data
+  * New upstream version 2.40.3+ds2
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Thu, 20 Aug 2026 11:41:01 -0300
+
 docker-compose-v2 (2.40.3+ds1-0ubuntu1) resolute; urgency=medium
 
   * New upstream version 2.40.3
