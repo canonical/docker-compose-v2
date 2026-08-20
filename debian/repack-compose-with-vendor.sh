@@ -38,6 +38,9 @@ tar xf "$orig_tar" -C "$work_dir"
 source_dir_name=$(ls -1 "$work_dir")
 cd "$work_dir/$source_dir_name"
 "$GOBIN" mod vendor
+# Remove OASIS-IPR non-free files as done in the golang-github-miekg-pkcs11
+# source package d/copyright file through Exlude-Files
+rm -f vendor/github.com/miekg/pkcs11/{pkcs11t.h,pkcs11.h,pkcs11f.h}
 cd ..
 tar cJf "$orig_tar" "$source_dir_name"
 
