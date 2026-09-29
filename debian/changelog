@@ -1,3 +1,11 @@
+docker-compose-v2 (2.40.3+ds2-0ubuntu2) stonking; urgency=medium
+
+  * Build against Go 1.26. Thanks to Jeremy Bicha
+    - d/control: build with golang 1.24
+    - d/rules: add golang 1.26 to PATH
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Tue, 29 Sep 2026 09:15:21 -0300
+
 docker-compose-v2 (2.40.3+ds2-0ubuntu1) stonking; urgency=medium
 
   * d/p/unembed-nss.patch: use libnss to avoid vendored non-free headers
