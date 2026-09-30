@@ -26,9 +26,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/compose-spec/compose-go/v2/consts"
 	"github.com/compose-spec/compose-go/v2/errdefs"
@@ -40,10 +40,11 @@ import (
 	"github.com/compose-spec/compose-go/v2/transform"
 	"github.com/compose-spec/compose-go/v2/tree"
 	"github.com/compose-spec/compose-go/v2/types"
+	"github.com/compose-spec/compose-go/v2/utils"
 	"github.com/compose-spec/compose-go/v2/validation"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/sirupsen/logrus"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Options supported by Load
@@ -66,6 +67,10 @@ type Options struct {
 	SkipInclude bool
 	// SkipResolveEnvironment will ignore computing `environment` for services
 	SkipResolveEnvironment bool
+	// SkipResolveLabels will ignore resolving `label_file` into `labels` for services.
+	// When set, service `labels` may be incomplete: `label_file` entries are left unresolved,
+	// so callers must not treat `labels` as authoritative.
+	SkipResolveLabels bool
 	// SkipDefaultValues will ignore missing required attributes
 	SkipDefaultValues bool
 	// Interpolation options
@@ -78,21 +83,38 @@ type Options struct {
 	projectNameImperativelySet bool
 	// Profiles set profiles to enable
 	Profiles []string
+	// SelectedServices restricts the project model to these services (and their dependencies)
+	// after parsing. An empty slice means "all services". When set, services not in the list
+	// are dropped from the project before environment resolution, so their env_file / label_file
+	// entries are not loaded.
+	SelectedServices []string
+	// PruneUnnecessaryResources drops networks/volumes/secrets/configs/models that are not
+	// referenced by active services after service selection.
+	PruneUnnecessaryResources bool
 	// ResourceLoaders manages support for remote resources
 	ResourceLoaders []ResourceLoader
 	// KnownExtensions manages x-* attribute we know and the corresponding go structs
 	KnownExtensions map[string]any
 	// Metada for telemetry
 	Listeners []Listener
+	// MaxNodeVisits caps total YAML node visits during reset/override resolution.
+	// Zero means use the default. Useful for very large compose files that exceed the default cap.
+	MaxNodeVisits int
 }
 
-var versionWarning []string
+var (
+	versionWarning   = utils.NewSet[string]()
+	versionWarningMu sync.Mutex
+)
 
+// warnObsoleteVersion warns once per file for the process lifetime (kept global so repeated LoadProject calls, e.g. compose watch, don't re-warn).
 func (o *Options) warnObsoleteVersion(file string) {
-	if !slices.Contains(versionWarning, file) {
+	versionWarningMu.Lock()
+	defer versionWarningMu.Unlock()
+	if !versionWarning.Has(file) {
 		logrus.Warning(fmt.Sprintf("%s: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion", file))
+		versionWarning.Add(file)
 	}
-	versionWarning = append(versionWarning, file)
 }
 
 type Listener = func(event string, metadata map[string]any)
@@ -184,6 +206,8 @@ func (o *Options) clone() *Options {
 		projectName:                o.projectName,
 		projectNameImperativelySet: o.projectNameImperativelySet,
 		Profiles:                   o.Profiles,
+		SelectedServices:           o.SelectedServices,
+		PruneUnnecessaryResources:  o.PruneUnnecessaryResources,
 		ResourceLoaders:            o.ResourceLoaders,
 		KnownExtensions:            o.KnownExtensions,
 		Listeners:                  o.Listeners,
@@ -255,6 +279,22 @@ func WithProfiles(profiles []string) func(*Options) {
 	return func(opts *Options) {
 		opts.Profiles = profiles
 	}
+}
+
+// WithSelectedServices restricts the loaded project to the given services and their
+// dependencies. An empty slice means "all services". When set, services not in the
+// list are dropped from the project before environment resolution: their `env_file`
+// and `label_file` entries will not be loaded from disk.
+func WithSelectedServices(services []string) func(*Options) {
+	return func(opts *Options) {
+		opts.SelectedServices = services
+	}
+}
+
+// WithoutUnnecessaryResources drops networks/volumes/secrets/configs/models that
+// are not referenced by services remaining after selection.
+func WithoutUnnecessaryResources(opts *Options) {
+	opts.PruneUnnecessaryResources = true
 }
 
 // PostProcessor is used to tweak compose model based on metadata extracted during yaml Unmarshal phase
@@ -374,6 +414,10 @@ func loadYamlModel(ctx context.Context, config types.ConfigDetails, opts *Option
 	)
 	workingDir, environment := config.WorkingDir, config.Environment
 
+	// interpolation options and environment are fixed within this call, so
+	// extends.file bases can be shared by every service loaded from it
+	ctx = withExtendsCache(ctx)
+
 	for _, file := range config.ConfigFiles {
 		dict, _, err = loadYamlFile(ctx, file, opts, workingDir, environment, ct, dict, included)
 		if err != nil {
@@ -427,7 +471,7 @@ func loadYamlFile(ctx context.Context,
 		file.Content = content
 	}
 
-	processRawYaml := func(raw interface{}, processors ...PostProcessor) error {
+	processRawYaml := func(raw interface{}, processor PostProcessor) error {
 		converted, err := convertToStringKeysRecursive(raw, "")
 		if err != nil {
 			return err
@@ -446,25 +490,26 @@ func loadYamlFile(ctx context.Context,
 
 		fixEmptyNotNull(cfg)
 
-		if !opts.SkipExtends {
-			err = ApplyExtends(ctx, cfg, opts, ct, processors...)
-			if err != nil {
-				return err
-			}
-		}
-
-		for _, processor := range processors {
-			if err := processor.Apply(dict); err != nil {
-				return err
-			}
-		}
-
+		// Process includes first so that extended services have all merged attributes
 		if !opts.SkipInclude {
 			included = append(included, file.Filename)
-			err = ApplyInclude(ctx, workingDir, environment, cfg, opts, included)
+			err = ApplyInclude(ctx, workingDir, environment, cfg, opts, included, processor)
 			if err != nil {
 				return err
 			}
+		}
+
+		if err := processor.Apply(dict); err != nil {
+			return err
+		}
+
+		// Process extends after includes so base services are fully merged
+		if !opts.SkipExtends {
+			err = ApplyExtends(ctx, cfg, opts, ct, processor)
+			if err != nil {
+				return err
+			}
+
 		}
 
 		dict, err = override.Merge(dict, cfg)
@@ -505,7 +550,7 @@ func loadYamlFile(ctx context.Context,
 		decoder := yaml.NewDecoder(r)
 		for {
 			var raw interface{}
-			reset := &ResetProcessor{target: &raw}
+			reset := &ResetProcessor{target: &raw, maxNodeVisits: opts.MaxNodeVisits}
 			err := decoder.Decode(reset)
 			if err != nil && errors.Is(err, io.EOF) {
 				break
@@ -519,7 +564,7 @@ func loadYamlFile(ctx context.Context,
 			}
 		}
 	} else {
-		if err := processRawYaml(file.Config); err != nil {
+		if err := processRawYaml(file.Config, NoopPostProcessor{}); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -535,7 +580,7 @@ func load(ctx context.Context, configDetails types.ConfigDetails, opts *Options,
 		}
 	}
 
-	dict, err := loadYamlModel(ctx, configDetails, opts, &cycleTracker{}, nil)
+	dict, err := loadYamlModel(withIncludeCache(ctx), configDetails, opts, &cycleTracker{}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -599,6 +644,24 @@ func ModelToProject(dict map[string]interface{}, opts *Options, configDetails ty
 		}
 	}
 
+	if len(opts.SelectedServices) > 0 {
+		// WithServicesEnabled must precede WithSelectedServices: the latter walks
+		// only active services, so any selected service currently sitting in
+		// DisabledServices (e.g. gated by a profile) would otherwise be invisible.
+		project, err = project.WithServicesEnabled(opts.SelectedServices...)
+		if err != nil {
+			return nil, err
+		}
+		project, err = project.WithSelectedServices(opts.SelectedServices)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if opts.PruneUnnecessaryResources {
+		project = project.WithoutUnnecessaryResources()
+	}
+
 	if !opts.SkipResolveEnvironment {
 		project, err = project.WithServicesEnvironmentResolved(opts.discardEnvFiles)
 		if err != nil {
@@ -606,9 +669,12 @@ func ModelToProject(dict map[string]interface{}, opts *Options, configDetails ty
 		}
 	}
 
-	project, err = project.WithServicesLabelsResolved(opts.discardEnvFiles)
-	if err != nil {
-		return nil, err
+	if !opts.SkipResolveLabels {
+		// discardEnvFiles only applies to `env_file`: `label_file` entries are never discarded
+		project, err = project.WithServicesLabelsResolved(false)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return project, nil

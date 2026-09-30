@@ -19,10 +19,12 @@ package schema
 import (
 	// Enable support for embedded static resources
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -45,23 +47,60 @@ func durationFormatChecker(input any) error {
 //go:embed compose-spec.json
 var Schema string
 
+// compiledSchema is the compose-spec schema compiled once and reused across
+// every Validate call. Compiling the schema (which loads and resolves the
+// draft 2020-12 meta-schema) is expensive and was previously redone on every
+// call; doing it once behind a sync.Once keeps Validate cheap and makes it
+// safe to call from several goroutines without sharing any mutable compiler
+// state. see https://github.com/docker/compose/issues/13866
+var (
+	compiledSchema     *jsonschema.Schema
+	compiledSchemaErr  error
+	compiledSchemaOnce sync.Once
+)
+
+func compileSchema() (*jsonschema.Schema, error) {
+	compiledSchemaOnce.Do(func() {
+		compiler := jsonschema.NewCompiler()
+		shema, err := jsonschema.UnmarshalJSON(strings.NewReader(Schema))
+		if err != nil {
+			compiledSchemaErr = err
+			return
+		}
+		if err := compiler.AddResource("compose-spec.json", shema); err != nil {
+			compiledSchemaErr = err
+			return
+		}
+		compiler.RegisterFormat(&jsonschema.Format{
+			Name:     "duration",
+			Validate: durationFormatChecker,
+		})
+		compiledSchema, compiledSchemaErr = compiler.Compile("compose-spec.json")
+	})
+	return compiledSchema, compiledSchemaErr
+}
+
 // Validate uses the jsonschema to validate the configuration
 func Validate(config map[string]interface{}) error {
-	compiler := jsonschema.NewCompiler()
-	json, err := jsonschema.UnmarshalJSON(strings.NewReader(Schema))
+	schema, err := compileSchema()
 	if err != nil {
 		return err
 	}
-	err = compiler.AddResource("compose-spec.json", json)
+
+	// santhosh-tekuri doesn't allow derived types
+	// see https://github.com/santhosh-tekuri/jsonschema/pull/240
+	marshaled, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}
-	compiler.RegisterFormat(&jsonschema.Format{
-		Name:     "duration",
-		Validate: durationFormatChecker,
-	})
-	schema := compiler.MustCompile("compose-spec.json")
-	err = schema.Validate(config)
+
+	var raw map[string]interface{}
+	err = json.Unmarshal(marshaled, &raw)
+	if err != nil {
+		return err
+	}
+
+	err = schema.Validate(raw)
 	var verr *jsonschema.ValidationError
 	if ok := errors.As(err, &verr); ok {
 		return validationError{getMostSpecificError(verr)}

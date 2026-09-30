@@ -18,16 +18,62 @@ package loader
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/dotenv"
 	interp "github.com/compose-spec/compose-go/v2/interpolation"
+	"github.com/compose-spec/compose-go/v2/override"
+	"github.com/compose-spec/compose-go/v2/tree"
 	"github.com/compose-spec/compose-go/v2/types"
 )
+
+type includeCacheKey struct{}
+
+// withIncludeCache attaches a fresh include cache to ctx. The cache is scoped
+// to a single load so a file reachable through several include paths (a
+// "diamond" include graph) is parsed and expanded only once per distinct
+// (paths, directories, environment) tuple.
+func withIncludeCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, includeCacheKey{}, map[string]map[string]any{})
+}
+
+func includeCache(ctx context.Context) map[string]map[string]any {
+	cache, _ := ctx.Value(includeCacheKey{}).(map[string]map[string]any)
+	return cache
+}
+
+// includeModelKey covers every input that determines the model loaded for an
+// include: resolved paths, working directory, project directory and effective
+// environment. Interpolate.Substitute and TypeCastMapping are intentionally
+// excluded: they are invariant across includes within a single load. If a
+// future option allows them to vary per include, they must be folded into the
+// key. Fields are length-prefixed and collections count-prefixed so the byte
+// stream is uniquely decodable.
+func includeModelKey(paths types.StringList, workingDir, projectDir string, env types.Mapping) string {
+	h := sha256.New()
+	write := func(s string) {
+		fmt.Fprintf(h, "%d:%s", len(s), s)
+	}
+	fmt.Fprintf(h, "%d;", len(paths))
+	for _, p := range paths {
+		write(p)
+	}
+	write(workingDir)
+	write(projectDir)
+	fmt.Fprintf(h, "%d;", len(env))
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		write(k)
+		write(env[k])
+	}
+	return string(h.Sum(nil))
+}
 
 // loadIncludeConfig parse the required config from raw yaml
 func loadIncludeConfig(source any) ([]types.IncludeConfig, error) {
@@ -50,7 +96,7 @@ func loadIncludeConfig(source any) ([]types.IncludeConfig, error) {
 	return requires, err
 }
 
-func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapping, model map[string]any, options *Options, included []string) error {
+func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapping, model map[string]any, options *Options, included []string, processor PostProcessor) error {
 	includeConfig, err := loadIncludeConfig(model["include"])
 	if err != nil {
 		return err
@@ -105,6 +151,9 @@ func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapp
 		loadOptions.ResolvePaths = true
 		loadOptions.SkipNormalization = true
 		loadOptions.SkipConsistencyCheck = true
+		// include and extends events are only reported for declarations in the
+		// config files passed to the loader, not for those in included files
+		loadOptions.Listeners = nil
 		loadOptions.ResourceLoaders = append(loadOptions.RemoteResourceLoaders(), localResourceLoader{
 			WorkingDir: r.ProjectDirectory,
 		})
@@ -117,6 +166,9 @@ func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapp
 		} else {
 			envFile := []string{}
 			for _, f := range r.EnvFile {
+				if f == "/dev/null" {
+					continue
+				}
 				if !filepath.IsAbs(f) {
 					f = filepath.Join(workingDir, f)
 					s, err := os.Stat(f)
@@ -147,11 +199,24 @@ func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapp
 			LookupValue:     config.LookupEnv,
 			TypeCastMapping: options.Interpolate.TypeCastMapping,
 		}
-		imported, err := loadYamlModel(ctx, config, loadOptions, &cycleTracker{}, included)
-		if err != nil {
-			return err
+		cache := includeCache(ctx)
+		cacheKey := includeModelKey(r.Path, relworkingdir, r.ProjectDirectory, config.Environment)
+		imported, hit := cache[cacheKey]
+		if hit {
+			// hand out a copy, the cached model must stay pristine
+			imported = deepClone(imported).(map[string]any)
+		} else {
+			imported, err = loadYamlModel(ctx, config, loadOptions, &cycleTracker{}, included)
+			if err != nil {
+				return err
+			}
+			if cache != nil {
+				// store a pristine copy: the model returned to the caller is
+				// merged into the parent and mutated by later loading phases
+				cache[cacheKey] = deepClone(imported).(map[string]any)
+			}
 		}
-		err = importResources(imported, model)
+		err = importResources(imported, model, processor)
 		if err != nil {
 			return err
 		}
@@ -161,29 +226,29 @@ func ApplyInclude(ctx context.Context, workingDir string, environment types.Mapp
 }
 
 // importResources import into model all resources defined by imported, and report error on conflict
-func importResources(source map[string]any, target map[string]any) error {
-	if err := importResource(source, target, "services"); err != nil {
+func importResources(source map[string]any, target map[string]any, processor PostProcessor) error {
+	if err := importResource(source, target, "services", processor); err != nil {
 		return err
 	}
-	if err := importResource(source, target, "volumes"); err != nil {
+	if err := importResource(source, target, "volumes", processor); err != nil {
 		return err
 	}
-	if err := importResource(source, target, "networks"); err != nil {
+	if err := importResource(source, target, "networks", processor); err != nil {
 		return err
 	}
-	if err := importResource(source, target, "secrets"); err != nil {
+	if err := importResource(source, target, "secrets", processor); err != nil {
 		return err
 	}
-	if err := importResource(source, target, "configs"); err != nil {
+	if err := importResource(source, target, "configs", processor); err != nil {
 		return err
 	}
-	if err := importResource(source, target, "models"); err != nil {
+	if err := importResource(source, target, "models", processor); err != nil {
 		return err
 	}
 	return nil
 }
 
-func importResource(source map[string]any, target map[string]any, key string) error {
+func importResource(source map[string]any, target map[string]any, key string, processor PostProcessor) error {
 	from := source[key]
 	if from != nil {
 		var to map[string]any
@@ -193,13 +258,31 @@ func importResource(source map[string]any, target map[string]any, key string) er
 			to = map[string]any{}
 		}
 		for name, a := range from.(map[string]any) {
-			if conflict, ok := to[name]; ok {
-				if reflect.DeepEqual(a, conflict) {
-					continue
-				}
-				return fmt.Errorf("%s.%s conflicts with imported resource", key, name)
+			conflict, ok := to[name]
+			if !ok {
+				to[name] = a
+				continue
 			}
-			to[name] = a
+			if reflect.DeepEqual(a, conflict) {
+				// Same resource reached through multiple include paths (a
+				// diamond); re-merging identical definitions would append
+				// duplicate entries to list-valued fields.
+				continue
+			}
+			err := processor.Apply(map[string]any{
+				key: map[string]any{
+					name: a,
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			merged, err := override.MergeYaml(a, conflict, tree.NewPath(key, name))
+			if err != nil {
+				return err
+			}
+			to[name] = merged
 		}
 		target[key] = to
 	}
