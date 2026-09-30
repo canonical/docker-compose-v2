@@ -733,9 +733,6 @@ github.com/pkg/errors
 github.com/planetscale/vtprotobuf/protohelpers
 github.com/planetscale/vtprotobuf/types/known/timestamppb
 github.com/planetscale/vtprotobuf/vtproto
-# github.com/pmezard/go-difflib v1.0.0
-## explicit
-github.com/pmezard/go-difflib/difflib
 # github.com/prometheus/client_golang v1.22.0
 ## explicit; go 1.22
 github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
@@ -790,10 +787,12 @@ github.com/spf13/cobra/doc
 # github.com/spf13/pflag v1.0.10
 ## explicit; go 1.12
 github.com/spf13/pflag
-# github.com/stretchr/testify v1.11.1
+# github.com/stretchr/testify v1.12.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/assert/yaml
+github.com/stretchr/testify/internal/difflib
+github.com/stretchr/testify/internal/spew
 github.com/stretchr/testify/require
 # github.com/theupdateframework/notary v0.7.0
 ## explicit; go 1.12
@@ -957,7 +956,7 @@ go.uber.org/goleak/internal/stack
 # go.uber.org/mock v0.6.0
 ## explicit; go 1.23.0
 go.uber.org/mock/gomock
-# go.yaml.in/yaml/v3 v3.0.4
+# go.yaml.in/yaml/v3 v3.0.5
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
 # golang.org/x/crypto v0.38.0
@@ -1468,6 +1467,6 @@ sigs.k8s.io/structured-merge-diff/v4/value
 ## explicit; go 1.12
 sigs.k8s.io/yaml
 sigs.k8s.io/yaml/goyaml.v2
-# tags.cncf.io/container-device-interface v1.0.1
-## explicit; go 1.20
+# tags.cncf.io/container-device-interface v1.1.1
+## explicit; go 1.23
 tags.cncf.io/container-device-interface/pkg/parser
