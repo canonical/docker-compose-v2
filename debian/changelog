@@ -1,3 +1,9 @@
+docker-compose-v2 (2.40.3+ds2-0ubuntu2~22.04.1) jammy; urgency=medium
+
+  * Backport from stonking to jammy (LP: #2153483)
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Tue, 13 Oct 2026 14:12:56 -0300
+
 docker-compose-v2 (2.40.3+ds2-0ubuntu2) stonking; urgency=medium
 
   * Build against Go 1.26. Thanks to Jeremy Bicha
