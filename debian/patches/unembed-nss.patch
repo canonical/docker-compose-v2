@@ -1,0 +1,60 @@
+Description: remove embedded pkcs11*.h code and use libnss instead
+ This patch was taken from the Debian golang-github-miekg-pkcs11 source package
+ and adapted to this Ubuntu vendorized package.
+Forwarded: no
+Author: Tianon Gravi <tianon@debian.org>
+Last-Update: 2026-08-20
+
+--- a/vendor/github.com/miekg/pkcs11/pkcs11go.h
++++ b/vendor/github.com/miekg/pkcs11/pkcs11go.h
+@@ -7,18 +7,14 @@
+ #ifndef NULL_PTR
+ #define NULL_PTR 0
+ #endif
+-#define CK_DEFINE_FUNCTION(returnType, name) returnType name
+-#define CK_DECLARE_FUNCTION(returnType, name) returnType name
+-#define CK_DECLARE_FUNCTION_POINTER(returnType, name) returnType (* name)
+-#define CK_CALLBACK_FUNCTION(returnType, name) returnType (* name)
+ 
+ #include <unistd.h>
+ #ifdef PACKED_STRUCTURES
+ # pragma pack(push, 1)
+-# include "pkcs11.h"
++# include <pkcs11.h>
+ # pragma pack(pop)
+ #else
+-# include "pkcs11.h"
++# include <pkcs11.h>
+ #endif
+ 
+ // Copy of CK_INFO but with default alignment (not packed). Go hides unaligned
+--- a/vendor/github.com/miekg/pkcs11/params.go
++++ b/vendor/github.com/miekg/pkcs11/params.go
+@@ -5,6 +5,7 @@
+ package pkcs11
+ 
+ /*
++#cgo pkg-config: nss
+ #include <stdlib.h>
+ #include <string.h>
+ #include "pkcs11go.h"
+--- a/vendor/github.com/miekg/pkcs11/types.go
++++ b/vendor/github.com/miekg/pkcs11/types.go
+@@ -5,6 +5,7 @@
+ package pkcs11
+ 
+ /*
++#cgo pkg-config: nss
+ #include <stdlib.h>
+ #include <string.h>
+ #include "pkcs11go.h"
+--- a/vendor/github.com/miekg/pkcs11/pkcs11.go
++++ b/vendor/github.com/miekg/pkcs11/pkcs11.go
+@@ -13,6 +13,7 @@
+ // * CK_ULONG never overflows an Go int
+ 
+ /*
++#cgo pkg-config: nss
+ #cgo windows CFLAGS: -DPACKED_STRUCTURES
+ #cgo linux LDFLAGS: -ldl
+ #cgo darwin LDFLAGS: -ldl
