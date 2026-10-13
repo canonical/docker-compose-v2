@@ -1,3 +1,9 @@
+docker-compose-v2 (2.40.3+ds2-0ubuntu2~26.04.1) resolute; urgency=medium
+
+  * Backport from stonking to resolute (LP: #2153483)
+
+ -- Athos Ribeiro <athos@ubuntu.com>  Tue, 13 Oct 2026 13:39:41 -0300
+
 docker-compose-v2 (2.40.3+ds2-0ubuntu2) stonking; urgency=medium
 
   * Build against Go 1.26. Thanks to Jeremy Bicha
